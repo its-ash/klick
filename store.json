@@ -1,0 +1,11 @@
+{
+  "id": "klick",
+  "name": "Klick",
+  "repo": "its-ash/klick",
+  "package": "com.itsash.klick",
+  "tagline": "A fully automatic camera that shoots RAW bursts and merges them into one clean photo.",
+  "description": "Klick is a point-and-shoot camera with nothing to set. Press the shutter and it captures a burst of RAW frames, chosen automatically from the scene: a few short frames in daylight, up to twelve in the dark, always exposed to protect highlights and limited by your hand shake. A native Rust engine on your phone aligns the frames, merges them to cut noise, develops the RAW with proper colour, lifts shadows and tames highlights, then denoises, sharpens and saves a JPEG. The reference frame can be kept as a DNG. Everything runs on your phone, with no ads and no tracking.",
+  "category": "Photography",
+  "icon": "assets/icon/logo-1024.png",
+  "homepage": "https://klick.itsash.in/"
+}

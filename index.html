@@ -1,0 +1,189 @@
+<!doctype html>
+<!-- Klick landing page (custom). Download links point at the latest GitHub release asset klick.apk. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Klick: the automatic RAW burst camera</title>
+<meta name="description" content="A fully automatic camera that shoots RAW bursts and merges them into one clean photo with a native Rust engine.">
+<meta name="theme-color" content="#1C1917">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Klick: the automatic RAW burst camera">
+<meta property="og:description" content="A fully automatic camera that shoots RAW bursts and merges them into one clean photo.">
+<meta property="og:image" content="https://klick.itsash.in/assets/icon/logo-1024.png">
+<meta property="og:url" content="https://klick.itsash.in/">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="assets/icon/logo-1024.png" type="image/png">
+<link rel="apple-touch-icon" href="assets/icon/logo-1024.png">
+<style>
+  :root {
+    color-scheme: light dark;
+    --icon-bg: #1C1917; --icon-fg: #F472B6;
+    --bg: #FAFAF9; --bg2: #F5F0EE; --card: #FFFFFF; --line: #E7DFDC;
+    --text: #1C1917; --muted: #57534E;
+    --accent: #BE185D; --btn: #1C1917; --on-btn: #F472B6; --soft: rgba(244,114,182,.20);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12100F; --bg2: #1C1917; --card: #1F1B1A; --line: #38302E;
+      --text: #F5EFEC; --muted: #B5ABA6;
+      --accent: #F472B6; --btn: #F472B6; --on-btn: #1C1917; --soft: rgba(244,114,182,.14);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  a:focus-visible, .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+  .skip { position: absolute; left: -999px; } .skip:focus { left: 8px; top: 8px; background: var(--card); padding: 8px 12px; z-index: 20; }
+
+  nav { position: sticky; top: 0; z-index: 10; background: var(--bg); border-bottom: 1px solid var(--line); }
+  nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 62px; }
+  .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; font-size: 18px; text-decoration: none; }
+  .brand img { width: 32px; height: 32px; border-radius: 8px; image-rendering: pixelated; }
+  .links { display: flex; gap: 20px; font-size: 14px; }
+  .links a { color: var(--muted); text-decoration: none; }
+  .links a:hover { color: var(--text); }
+
+  .hero { display: grid; grid-template-columns: 1.2fr .8fr; gap: 48px; align-items: center; padding: 72px 0 64px; }
+  .eyebrow { display: inline-block; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; font-weight: 600; color: var(--accent); background: var(--soft); border-radius: 999px; padding: 4px 12px; }
+  h1 { font-size: clamp(2.3rem, 5.4vw, 3.8rem); line-height: 1.06; margin: 18px 0 16px; letter-spacing: -.02em; }
+  h1 em { font-style: normal; color: var(--accent); }
+  .lead { color: var(--muted); font-size: 18px; max-width: 34em; margin: 0; }
+  .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+  .btn { display: inline-flex; align-items: center; height: 52px; padding: 0 26px; border-radius: 12px; font-weight: 600; text-decoration: none; color: var(--text); border: 1px solid var(--line); background: var(--card); }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--btn); color: var(--on-btn); border-color: var(--btn); }
+  .btn.primary:hover { filter: brightness(1.15); }
+  .meta { margin-top: 14px; color: var(--muted); font-size: 14px; }
+  .art { display: grid; place-items: center; }
+  .art img { width: min(320px, 80%); height: auto; border-radius: 22%; box-shadow: 0 24px 60px rgba(28,25,23,.35); image-rendering: pixelated; }
+
+  section { padding: 0 0 80px; }
+  h2 { font-size: clamp(1.6rem, 3.2vw, 2.2rem); margin: 0 0 10px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); max-width: 40em; margin: 0 0 32px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 12px; }
+  ol.steps li { counter-increment: s; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 20px 16px 64px; position: relative; color: var(--muted); }
+  ol.steps li::before { content: counter(s); position: absolute; left: 20px; top: 14px; width: 28px; height: 28px; border-radius: 8px; background: var(--btn); color: var(--on-btn); display: grid; place-items: center; font-weight: 700; font-size: 14px; }
+  li b, td b, .card b { color: var(--text); }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; font-size: 15px; }
+  th, td { text-align: left; padding: 12px 16px; border-top: 1px solid var(--line); vertical-align: top; color: var(--muted); }
+  tr:first-child th, tr:first-child td { border-top: 0; }
+  th { color: var(--text); font-weight: 600; white-space: nowrap; }
+  .note { background: var(--soft); border-radius: 12px; padding: 14px 18px; color: var(--text); font-size: 15px; margin-top: 16px; }
+  .final { text-align: center; background: var(--bg2); border: 1px solid var(--line); border-radius: 24px; padding: 52px 24px; }
+  .final .ctas { justify-content: center; }
+  .final .sub { margin-inline: auto; }
+  footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; padding: 28px 0 48px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; }
+
+  @media (max-width: 820px) {
+    .hero { grid-template-columns: 1fr; padding-top: 40px; gap: 28px; }
+    .art { order: -1; } .art img { width: 150px; }
+    .grid, .split { grid-template-columns: 1fr; }
+    .links a.hide-sm { display: none; }
+    th { white-space: normal; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<nav aria-label="Main">
+  <div class="wrap">
+    <a class="brand" href="#"><img src="assets/icon/logo-1024.png" alt="" width="32" height="32">Klick</a>
+    <div class="links">
+      <a class="hide-sm" href="#features">Features</a>
+      <a class="hide-sm" href="#how">How it works</a>
+      <a class="hide-sm" href="#privacy">Privacy</a>
+      <a href="https://github.com/its-ash/klick">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<main id="main" class="wrap">
+  <header class="hero">
+    <div>
+      <span class="eyebrow">Free · No ads · No account</span>
+      <h1>One press. <em>Many frames.</em> One clean photo.</h1>
+      <p class="lead">Klick is a fully automatic camera. It shoots a burst of RAW frames chosen for the scene, then a native Rust engine on your phone aligns, merges, develops and sharpens them into the best photo it can make. Nothing to set.</p>
+      <div class="ctas">
+        <a class="btn primary" href="https://github.com/its-ash/klick/releases/latest/download/klick.apk">Download APK</a>
+        <a class="btn" href="https://store.itsash.in">Get it in Ash Store</a>
+      </div>
+      <div class="meta">Android 10 (API 29) or newer · best on phones that offer RAW capture</div>
+    </div>
+    <div class="art"><img src="assets/icon/logo-1024.png" alt="Klick app icon: a pixel-art camera with an aperture" width="320" height="320"></div>
+  </header>
+
+  <section id="features">
+    <h2>Automatic, but not simple-minded</h2>
+    <p class="sub">The scene decides how many frames to shoot and how long to expose each one.</p>
+    <div class="grid">
+      <div class="card"><h3>Scene aware bursts</h3><p>Bright light gets 3 or 4 short frames. Low light gets 8 to 12. Badges show Night, HDR or Normal, and the frame count, live.</p></div>
+      <div class="card"><h3>Highlight protection</h3><p>Frames are deliberately exposed a little short so skies and lights do not clip. The engine lifts the shadows back from the merged result.</p></div>
+      <div class="card"><h3>Shake limited</h3><p>The gyroscope caps each exposure so a shaky hand gets shorter frames and more of them, not blur.</p></div>
+      <div class="card"><h3>Keeps the RAW</h3><p>The reference frame is saved as a DNG next to the JPEG, so you can edit it later. Switch it off in Settings if you want to save space.</p></div>
+      <div class="card"><h3>Keep shooting</h3><p>Photos process in the background. Take the next shot while the last one is finishing. A pill shows what is in the queue.</p></div>
+      <div class="card"><h3>Before and after</h3><p>The built-in gallery lets you flip each photo between the single reference frame and the processed result, and share it.</p></div>
+    </div>
+  </section>
+
+  <section id="how">
+    <h2>What the engine does</h2>
+    <p class="sub">Written in Rust, running on your phone.</p>
+    <ol class="steps">
+      <li><b>Align.</b> A coarse-to-fine tile search on a Gaussian pyramid finds how each frame moved.</li>
+      <li><b>Merge.</b> Tiles are blended with weights from the sensor noise model, so noise averages out and moving subjects do not ghost.</li>
+      <li><b>Develop.</b> Black level, lens shading, white balance, demosaic and camera colour matrix turn the RAW into colour.</li>
+      <li><b>Tone.</b> The histogram decides how much exposure fusion is worth: shadows up, highlights down, only when the scene needs it.</li>
+      <li><b>Clean up.</b> Luma and chroma denoise scaled to the noise level, then sharpening without halos, a touch of local contrast and vibrance.</li>
+      <li><b>Save.</b> A JPEG at your chosen quality goes to Pictures/Klick with orientation, exposure and ISO in the EXIF.</li>
+    </ol>
+    <div class="note">Phones without RAW capture still work: Klick shoots a full-resolution YUV burst and sends it through the same align and merge path.</div>
+  </section>
+
+  <section id="privacy">
+    <h2>Permissions and privacy</h2>
+    <p class="sub">Photos are processed on your phone. The only network call is the update check in Settings.</p>
+    <table>
+      <tr><th scope="row">Camera</th><td>To show the viewfinder and take photos.</td></tr>
+      <tr><th scope="row">Photos folder</th><td>Klick saves to Pictures/Klick through the Android media store. It needs no storage permission.</td></tr>
+      <tr><th scope="row">Location</th><td>Only if you turn on location tagging in Settings. It is off by default.</td></tr>
+      <tr><th scope="row">Internet</th><td>Only for the update check in Settings.</td></tr>
+    </table>
+  </section>
+
+  <section id="requirements">
+    <div class="split">
+      <div class="card"><h3>Requirements</h3><p>Android 10 (API 29) or newer. RAW capture needs a phone whose back camera exposes it to apps; others use the YUV path.</p></div>
+      <div class="card"><h3>Install</h3><p>Klick is not on Google Play. Tap Download APK on your phone and open the file. If Android asks, allow your browser to <b>install unknown apps</b>. Or install Ash Store once and get updates from it.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="final">
+      <h2>Just press the shutter.</h2>
+      <p class="sub">Free, no account, no ads.</p>
+      <div class="ctas">
+        <a class="btn primary" href="https://github.com/its-ash/klick/releases/latest/download/klick.apk">Download APK</a>
+        <a class="btn" href="https://store.itsash.in">Get it in Ash Store</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span><a href="https://github.com/its-ash/klick">Klick on GitHub</a> · <a href="https://store.itsash.in">Ash Store</a></span>
+    <span>Developed by <a href="https://itsash.github.io">Ashvini Jangid</a>. Android is a trademark of Google LLC.</span>
+  </div>
+</footer>
+</body>
+</html>

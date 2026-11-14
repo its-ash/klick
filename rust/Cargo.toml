@@ -1,0 +1,28 @@
+[package]
+name = "klick-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Burst alignment, merge, demosaic, tone mapping and JPEG encoding for Klick"
+publish = false
+
+[lib]
+name = "klick_engine"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.21"
+rayon = "1.10"
+jpeg-encoder = "0.6"
+
+[dev-dependencies]
+jpeg-decoder = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"
+strip = true
+
+[profile.test]
+opt-level = 2
