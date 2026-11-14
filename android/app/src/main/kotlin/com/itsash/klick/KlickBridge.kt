@@ -26,7 +26,9 @@ import java.util.concurrent.Executors
 class KlickBridge(private val activity: Activity, engine: FlutterEngine) : MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
     private var sink: EventChannel.EventSink? = null
-    private val shake = ShakeMonitor(activity)
+    private val shake = ShakeMonitor(activity) { roll, flat ->
+        sink?.success(mapOf("type" to "level", "roll" to roll, "flat" to flat))
+    }
     private val processor = PhotoProcessor(activity) { e -> main.post { sink?.success(e) } }
     private val camera = CameraController(activity, engine.renderer, processor, shake) { e -> sink?.success(e) }
     private val io = Executors.newFixedThreadPool(2)
@@ -56,7 +58,15 @@ class KlickBridge(private val activity: Activity, engine: FlutterEngine) : Metho
                 mapOf("available" to NativeEngine.available, "version" to if (NativeEngine.available) NativeEngine.version() else ""),
             )
             "permission" -> requestPermissions(call.argument<Boolean>("location") == true, result)
-            "start" -> camera.start(call.argument<String>("lensId")) { r -> reply(result, r) }
+            "start" -> {
+                call.argument<Boolean>("autoMacro")?.let { camera.autoMacro = it }
+                camera.start(call.argument<String>("lensId")) { r -> reply(result, r) }
+            }
+            "selectLens" -> camera.selectLens(call.argument<String>("lensId") ?: "") { r -> reply(result, r) }
+            "setAutoMacro" -> {
+                camera.autoMacro = call.argument<Boolean>("on") ?: true
+                result.success(null)
+            }
             "stop" -> camera.stop { result.success(null) }
             "tapFocus" -> {
                 camera.tapFocus(call.argument<Double>("x") ?: 0.5, call.argument<Double>("y") ?: 0.5)
@@ -144,7 +154,7 @@ class KlickBridge(private val activity: Activity, engine: FlutterEngine) : Metho
         val refs = java.io.File(activity.filesDir, "refs")
         val proj = arrayOf(
             MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.DATE_ADDED,
-            MediaStore.Images.Media.WIDTH, MediaStore.Images.Media.HEIGHT,
+            MediaStore.Images.Media.WIDTH, MediaStore.Images.Media.HEIGHT, MediaStore.Images.Media.ORIENTATION,
         )
         val sel = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? AND ${MediaStore.Images.Media.MIME_TYPE} = ?"
         val args = arrayOf("Pictures/Klick%", "image/jpeg")
@@ -155,6 +165,13 @@ class KlickBridge(private val activity: Activity, engine: FlutterEngine) : Metho
                 val id = c.getLong(0)
                 val name = c.getString(1)
                 val ref = java.io.File(refs, name)
+                // Photos taken before refs were tagged: copy the photo's orientation onto its "before" render once.
+                if (ref.exists() && runCatching {
+                        androidx.exifinterface.media.ExifInterface(ref).getAttributeInt(androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION, 0) == 0
+                    }.getOrDefault(false)
+                ) {
+                    PhotoProcessor.tagOrientation(ref, c.getInt(5))
+                }
                 out += mapOf(
                     "uri" to ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id).toString(),
                     "name" to name,

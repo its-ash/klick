@@ -53,7 +53,9 @@ class _GalleryScreenState extends State<GalleryScreen> {
               camera: widget.camera,
               onTap: () async {
                 await Navigator.of(context).push<bool>(
-                  MaterialPageRoute(builder: (_) => ViewerScreen(photos: photos, index: i, camera: widget.camera)),
+                  MaterialPageRoute(
+                    builder: (_) => ViewerScreen(photos: photos, index: i, camera: widget.camera),
+                  ),
                 );
                 if (mounted) _reload();
               },
@@ -89,9 +91,8 @@ class _ThumbState extends State<_Thumb> {
           color: context.colors.surfaceMuted,
           child: FutureBuilder<Uint8List>(
             future: _bytes,
-            builder: (context, snap) => snap.hasData
-                ? Image.memory(snap.data!, fit: BoxFit.cover, gaplessPlayback: true)
-                : const SizedBox.expand(),
+            builder: (context, snap) =>
+                snap.hasData ? Image.memory(snap.data!, fit: BoxFit.cover, gaplessPlayback: true) : const SizedBox.expand(),
           ),
         ),
       ),

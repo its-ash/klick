@@ -121,6 +121,53 @@ pub fn refine_wb(bayer: &[f32], w: usize, h: usize, cfa: u8, base: [f32; 3]) -> 
     out
 }
 
+/// Normalised level where a sample starts to count as clipped, and where it is fully clipped.
+const CLIP_LO: f32 = 0.88;
+const CLIP_HI: f32 = 0.98;
+
+/// Per 2x2 quad, how clipped it is: 0 when every sample is well below saturation, rising smoothly to 1
+/// when the brightest one is saturated. Must run on normalised RAW, before lens shading gains.
+pub fn clip_weights(bayer: &[f32], w: usize, h: usize) -> Plane {
+    let (qw, qh) = (w / 2, h / 2);
+    let mut d = vec![0.0f32; qw * qh];
+    d.par_chunks_mut(qw).enumerate().for_each(|(y, row)| {
+        let r0 = &bayer[(2 * y) * w..(2 * y + 1) * w];
+        let r1 = &bayer[(2 * y + 1) * w..(2 * y + 2) * w];
+        for (x, o) in row.iter_mut().enumerate() {
+            let m = r0[2 * x].max(r0[2 * x + 1]).max(r1[2 * x]).max(r1[2 * x + 1]);
+            let t = ((m - CLIP_LO) / (CLIP_HI - CLIP_LO)).clamp(0.0, 1.0);
+            *o = t * t * (3.0 - 2.0 * t);
+        }
+    });
+    Plane { w: qw, h: qh, d }
+}
+
+/// White balance with highlight handling. A clipped sample has lost its true value, and multiplying
+/// clipped red and blue by their (larger than green) gains turns specular highlights and shiny
+/// surfaces pink. Inside clipped quads every sample is pulled towards the quad's brightest
+/// white-balanced value, so blown highlights come out neutral white instead.
+pub fn apply_wb_highlights(bayer: &mut [f32], w: usize, cfa: u8, gains: [f32; 3], clip: &Plane) {
+    bayer.par_chunks_mut(2 * w).enumerate().for_each(|(qy, rows)| {
+        if rows.len() < 2 * w || qy >= clip.h {
+            return;
+        }
+        for qx in 0..(w / 2).min(clip.w) {
+            let idx = [2 * qx, 2 * qx + 1, w + 2 * qx, w + 2 * qx + 1];
+            let mut vals = [0.0f32; 4];
+            let mut top = 0.0f32;
+            for (k, &i) in idx.iter().enumerate() {
+                let (x, y) = (i % w, 2 * qy + i / w);
+                vals[k] = rows[i].max(0.0) * gains[cfa_color(cfa, x, y)];
+                top = top.max(vals[k]);
+            }
+            let t = clip.d[qy * clip.w + qx];
+            for (k, &i) in idx.iter().enumerate() {
+                rows[i] = vals[k] + (top - vals[k]) * t;
+            }
+        }
+    });
+}
+
 pub fn apply_wb(bayer: &mut [f32], w: usize, cfa: u8, gains: [f32; 3]) {
     bayer.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for (x, v) in row.iter_mut().enumerate() {
@@ -132,6 +179,26 @@ pub fn apply_wb(bayer: &mut [f32], w: usize, cfa: u8, gains: [f32; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipped_highlights_come_out_neutral_not_pink() {
+        let (w, h) = (8, 8);
+        // Left half fully clipped (a specular reflection), right half an ordinary mid tone.
+        let mut b: Vec<f32> = (0..w * h).map(|i| if i % w < 4 { 1.0 } else { 0.3 }).collect();
+        let gains = [2.0, 1.0, 1.6];
+        let clip = clip_weights(&b, w, h);
+        apply_wb_highlights(&mut b, w, 0, gains, &clip);
+        // Clipped quads: every sample equal, so R = G = B after demosaic (white, not pink).
+        let clipped: Vec<f32> = (0..h).flat_map(|y| (0..4).map(move |x| (y, x))).map(|(y, x)| b[y * w + x]).collect();
+        assert!(clipped.iter().all(|v| (v - 2.0).abs() < 1e-5), "{:?}", clipped);
+        // Unclipped quads keep plain white balance.
+        for y in 0..h {
+            for x in 4..w {
+                let want = 0.3 * gains[cfa_color(0, x, y)];
+                assert!((b[y * w + x] - want).abs() < 1e-5);
+            }
+        }
+    }
 
     fn meta() -> Meta {
         Meta { white: 1023.0, black: [63.0, 64.0, 64.0, 65.0], ..Meta::default() }

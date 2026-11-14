@@ -1,8 +1,15 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:klick/core/queue.dart';
 
-Map<String, Object?> job(int id, String state, {String? uri, String? message}) =>
-    {'type': 'job', 'id': id, 'state': state, 'scene': 'night', 'frames': 9, 'uri': uri, 'message': message};
+Map<String, Object?> job(int id, String state, {String? uri, String? message}) => {
+  'type': 'job',
+  'id': id,
+  'state': state,
+  'scene': 'night',
+  'frames': 9,
+  'uri': uri,
+  'message': message,
+};
 
 void main() {
   test('starts idle', () {

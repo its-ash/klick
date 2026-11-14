@@ -43,6 +43,13 @@ class SettingsScreen extends StatelessWidget {
                   value: settings.grid,
                   onChanged: settings.setGrid,
                 ),
+                UiSwitchTile(
+                  'Auto macro',
+                  subtitle: 'Switches to the close-focusing lens when the subject is too close',
+                  icon: Icons.local_florist_outlined,
+                  value: settings.autoMacro,
+                  onChanged: settings.setAutoMacro,
+                ),
               ],
             ),
             const UiGap(UiSpace.lg),

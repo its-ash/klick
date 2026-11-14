@@ -3,15 +3,7 @@ import 'package:flutter/foundation.dart';
 enum JobState { queued, processing, done, failed }
 
 class JobInfo {
-  const JobInfo({
-    required this.id,
-    required this.state,
-    this.scene = 'normal',
-    this.frames = 0,
-    this.uri,
-    this.name,
-    this.message,
-  });
+  const JobInfo({required this.id, required this.state, this.scene = 'normal', this.frames = 0, this.uri, this.name, this.message});
 
   final int id;
   final JobState state;
@@ -24,14 +16,14 @@ class JobInfo {
   bool get active => state == JobState.queued || state == JobState.processing;
 
   JobInfo copyWith({JobState? state, String? uri, String? name, String? message}) => JobInfo(
-        id: id,
-        state: state ?? this.state,
-        scene: scene,
-        frames: frames,
-        uri: uri ?? this.uri,
-        name: name ?? this.name,
-        message: message ?? this.message,
-      );
+    id: id,
+    state: state ?? this.state,
+    scene: scene,
+    frames: frames,
+    uri: uri ?? this.uri,
+    name: name ?? this.name,
+    message: message ?? this.message,
+  );
 }
 
 /// Tracks photos being processed natively so the user can keep shooting.
@@ -75,21 +67,10 @@ class ProcessingQueue extends ChangeNotifier {
     };
     if (id == null || state == null) return;
     final old = _jobs[id];
-    var job = old ??
-        JobInfo(
-          id: id,
-          state: state,
-          scene: (e['scene'] as String?) ?? 'normal',
-          frames: (e['frames'] as num?)?.toInt() ?? 0,
-        );
+    var job = old ?? JobInfo(id: id, state: state, scene: (e['scene'] as String?) ?? 'normal', frames: (e['frames'] as num?)?.toInt() ?? 0);
     // States only move forward.
     if (old != null && state.index < old.state.index) return;
-    job = job.copyWith(
-      state: state,
-      uri: e['uri'] as String?,
-      name: e['name'] as String?,
-      message: e['message'] as String?,
-    );
+    job = job.copyWith(state: state, uri: e['uri'] as String?, name: e['name'] as String?, message: e['message'] as String?);
     _jobs[id] = job;
     if (state == JobState.done) _lastDone = job;
     if (state == JobState.failed) _lastError = job.message ?? 'Processing failed';

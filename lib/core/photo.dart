@@ -1,13 +1,6 @@
 /// A processed Klick photo in MediaStore `Pictures/Klick`.
 class Photo {
-  const Photo({
-    required this.uri,
-    required this.name,
-    required this.added,
-    this.width = 0,
-    this.height = 0,
-    this.refPath,
-  });
+  const Photo({required this.uri, required this.name, required this.added, this.width = 0, this.height = 0, this.refPath});
 
   final String uri;
   final String name;
@@ -21,11 +14,11 @@ class Photo {
   bool get hasBefore => refPath != null;
 
   static Photo fromMap(Map<dynamic, dynamic> m) => Photo(
-        uri: m['uri'] as String,
-        name: (m['name'] as String?) ?? '',
-        added: DateTime.fromMillisecondsSinceEpoch((m['added'] as num?)?.toInt() ?? 0),
-        width: (m['width'] as num?)?.toInt() ?? 0,
-        height: (m['height'] as num?)?.toInt() ?? 0,
-        refPath: m['ref'] as String?,
-      );
+    uri: m['uri'] as String,
+    name: (m['name'] as String?) ?? '',
+    added: DateTime.fromMillisecondsSinceEpoch((m['added'] as num?)?.toInt() ?? 0),
+    width: (m['width'] as num?)?.toInt() ?? 0,
+    height: (m['height'] as num?)?.toInt() ?? 0,
+    refPath: m['ref'] as String?,
+  );
 }

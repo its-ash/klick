@@ -21,6 +21,8 @@ class CameraInfo {
     required this.flash,
     required this.lensId,
     required this.lenses,
+    this.mainLensId,
+    this.macroLensId,
   });
 
   final int textureId;
@@ -34,19 +36,25 @@ class CameraInfo {
   final String lensId;
   final List<Lens> lenses;
 
+  /// The everyday lens (about 1x) and the close-focusing one, when the phone has both.
+  final String? mainLensId;
+  final String? macroLensId;
+
   static CameraInfo fromMap(Map<dynamic, dynamic> m) => CameraInfo(
-        textureId: (m['textureId'] as num).toInt(),
-        previewWidth: (m['previewWidth'] as num).toInt(),
-        previewHeight: (m['previewHeight'] as num).toInt(),
-        sensorOrientation: (m['sensorOrientation'] as num?)?.toInt() ?? 90,
-        raw: m['raw'] == true,
-        flash: m['flash'] == true,
-        lensId: (m['lensId'] as String?) ?? '',
-        lenses: [
-          for (final l in (m['lenses'] as List? ?? const []))
-            Lens(id: l['id'] as String, label: l['label'] as String, zoom: (l['zoom'] as num).toDouble()),
-        ],
-      );
+    textureId: (m['textureId'] as num).toInt(),
+    previewWidth: (m['previewWidth'] as num).toInt(),
+    previewHeight: (m['previewHeight'] as num).toInt(),
+    sensorOrientation: (m['sensorOrientation'] as num?)?.toInt() ?? 90,
+    raw: m['raw'] == true,
+    flash: m['flash'] == true,
+    lensId: (m['lensId'] as String?) ?? '',
+    mainLensId: m['mainLensId'] as String?,
+    macroLensId: m['macroLensId'] as String?,
+    lenses: [
+      for (final l in (m['lenses'] as List? ?? const []))
+        Lens(id: l['id'] as String, label: l['label'] as String, zoom: (l['zoom'] as num).toDouble()),
+    ],
+  );
 }
 
 class CaptureAck {
@@ -66,7 +74,13 @@ class EngineInfo {
 abstract class CameraApi {
   Future<EngineInfo> engine();
   Future<bool> permission({bool location = false});
-  Future<CameraInfo> start({String? lensId});
+  Future<CameraInfo> start({String? lensId, bool autoMacro = true});
+
+  /// Shows another lens: instant when it already runs as the standby camera, else a restart.
+  Future<CameraInfo> selectLens(String lensId);
+
+  /// Lets the camera switch to the close-focusing lens by itself (and back).
+  Future<void> setAutoMacro(bool on);
   Future<void> stop();
   Future<void> tapFocus(double x, double y);
   Future<CaptureAck> capture({
@@ -77,7 +91,9 @@ abstract class CameraApi {
     required bool location,
   });
 
-  /// Native events: `scene` metering ticks, `job` queue updates, `error`.
+  /// Native events: `scene` metering ticks, `job` queue updates, `lens` (auto macro switched the
+  /// lens on screen: `info`, `macro`), `macro` (single-camera phones: restart on `lensId`), `level`,
+  /// `error`.
   Stream<Map<dynamic, dynamic>> events();
 
   Future<List<Photo>> listPhotos();
@@ -103,10 +119,19 @@ class CameraChannel implements CameraApi {
       (await _method.invokeMethod<bool>('permission', {'location': location})) ?? false;
 
   @override
-  Future<CameraInfo> start({String? lensId}) async {
-    final m = await _method.invokeMapMethod<String, dynamic>('start', {'lensId': lensId});
+  Future<CameraInfo> start({String? lensId, bool autoMacro = true}) async {
+    final m = await _method.invokeMapMethod<String, dynamic>('start', {'lensId': lensId, 'autoMacro': autoMacro});
     return CameraInfo.fromMap(m!);
   }
+
+  @override
+  Future<CameraInfo> selectLens(String lensId) async {
+    final m = await _method.invokeMapMethod<String, dynamic>('selectLens', {'lensId': lensId});
+    return CameraInfo.fromMap(m!);
+  }
+
+  @override
+  Future<void> setAutoMacro(bool on) => _method.invokeMethod('setAutoMacro', {'on': on});
 
   @override
   Future<void> stop() => _method.invokeMethod('stop');
@@ -137,8 +162,7 @@ class CameraChannel implements CameraApi {
   }
 
   @override
-  Stream<Map<dynamic, dynamic>> events() =>
-      _events.receiveBroadcastStream().where((e) => e is Map).map((e) => e as Map<dynamic, dynamic>);
+  Stream<Map<dynamic, dynamic>> events() => _events.receiveBroadcastStream().where((e) => e is Map).map((e) => e as Map<dynamic, dynamic>);
 
   @override
   Future<List<Photo>> listPhotos() async {

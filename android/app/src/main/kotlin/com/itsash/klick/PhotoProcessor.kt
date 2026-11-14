@@ -110,6 +110,8 @@ class PhotoProcessor(private val context: Context, private val emit: (Map<String
             refIndex = status.refIndex.coerceIn(0, job.frameCount - 1)
             NativeEngine.referenceYuv(job.buffers.subList(refIndex * 3, refIndex * 3 + 3).toTypedArray(), job.width, job.height, job.yuvStrides, refFile.path, 80)
         }
+        // The "before" render must turn the same way as the photo in the compare slider.
+        tagOrientation(refFile, job.jpegOrientation)
 
         writeExif(tmp, job, refIndex, status)
         val uri = insert("$base.jpg", "image/jpeg") { out -> tmp.inputStream().use { it.copyTo(out) } }
@@ -129,12 +131,7 @@ class PhotoProcessor(private val context: Context, private val emit: (Map<String
 
     private fun writeExif(file: File, job: BurstJob, refIndex: Int, status: NativeEngine.Status) {
         val ex = ExifInterface(file)
-        val orientation = when (job.jpegOrientation) {
-            90 -> ExifInterface.ORIENTATION_ROTATE_90
-            180 -> ExifInterface.ORIENTATION_ROTATE_180
-            270 -> ExifInterface.ORIENTATION_ROTATE_270
-            else -> ExifInterface.ORIENTATION_NORMAL
-        }
+        val orientation = exifOrientation(job.jpegOrientation)
         val res = job.results.getOrNull(refIndex)
         val iso = res?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY) ?: job.plan.iso
         val expNs = res?.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME) ?: job.plan.exposureNs
@@ -155,14 +152,7 @@ class PhotoProcessor(private val context: Context, private val emit: (Map<String
 
     private fun writeDng(out: java.io.OutputStream, job: BurstJob, refIndex: Int) {
         val dng = DngCreator(job.characteristics, job.results[refIndex])
-        dng.setOrientation(
-            when (job.jpegOrientation) {
-                90 -> ExifInterface.ORIENTATION_ROTATE_90
-                180 -> ExifInterface.ORIENTATION_ROTATE_180
-                270 -> ExifInterface.ORIENTATION_ROTATE_270
-                else -> ExifInterface.ORIENTATION_NORMAL
-            },
-        )
+        dng.setOrientation(exifOrientation(job.jpegOrientation))
         job.location?.let { dng.setLocation(it) }
         val src = job.buffers[refIndex].duplicate().apply { rewind() }
         val tight = job.width * 2
@@ -204,5 +194,22 @@ class PhotoProcessor(private val context: Context, private val emit: (Map<String
     companion object {
         /** Direct memory budget for bursts waiting or being processed. */
         const val BUDGET_BYTES = 640L * 1024 * 1024
+
+        /** EXIF orientation tag for a clockwise rotation in degrees. */
+        fun exifOrientation(degrees: Int): Int = when (((degrees % 360) + 360) % 360) {
+            90 -> ExifInterface.ORIENTATION_ROTATE_90
+            180 -> ExifInterface.ORIENTATION_ROTATE_180
+            270 -> ExifInterface.ORIENTATION_ROTATE_270
+            else -> ExifInterface.ORIENTATION_NORMAL
+        }
+
+        /** Tags a JPEG so viewers turn it the way the phone was held when the photo was taken. */
+        fun tagOrientation(file: File, degrees: Int) {
+            runCatching {
+                val ex = ExifInterface(file)
+                ex.setAttribute(ExifInterface.TAG_ORIENTATION, exifOrientation(degrees).toString())
+                ex.saveAttributes()
+            }
+        }
     }
 }

@@ -8,7 +8,7 @@ use crate::finish::{finish, quick_srgb8, FinishInfo, FinishParams};
 use crate::merge::{Merger, NoiseModel};
 use crate::meta::Meta;
 use crate::plane::{box_downsample, resize_bilinear, Plane};
-use crate::raw::{apply_lsc, apply_wb, bin_grey, normalize_raw, refine_wb, wb_gains, Lsc};
+use crate::raw::{apply_lsc, apply_wb_highlights, bin_grey, clip_weights, normalize_raw, refine_wb, wb_gains, Lsc};
 use crate::tone::srgb_decode;
 use rayon::prelude::*;
 
@@ -57,12 +57,14 @@ fn check_dims(w: usize, h: usize) -> Result<(), String> {
 
 /// Merged, normalised Bayer to linear sRGB (stage 3).
 pub fn develop_bayer(mut bayer: Vec<f32>, w: usize, h: usize, meta: &Meta, lsc: Option<&Lsc>, max_pixels: usize) -> Rgb {
+    // Clipping is judged on the sensor values, before lens shading lifts the corners.
+    let clip = clip_weights(&bayer, w, h);
     if let Some(l) = lsc {
         apply_lsc(&mut bayer, w, h, meta.cfa, l);
     }
     let base = wb_gains(meta.neutral);
     let gains = refine_wb(&bayer, w, h, meta.cfa, base);
-    apply_wb(&mut bayer, w, meta.cfa, gains);
+    apply_wb_highlights(&mut bayer, w, meta.cfa, gains, &clip);
     let mut rgb = if w * h > max_pixels { bin_quads(&bayer, w, h, meta.cfa) } else { demosaic_mhc(&bayer, w, h, meta.cfa) };
     drop(bayer);
     apply_matrix(&mut rgb, &camera_to_srgb(meta));
@@ -94,10 +96,11 @@ pub fn process_raw(frames: &[&[u8]], w: usize, h: usize, stride: usize, meta: &M
 pub fn reference_raw(frame: &[u8], w: usize, h: usize, stride: usize, meta: &Meta, lsc: Option<&Lsc>, quality: u8) -> Result<(Vec<u8>, usize, usize), String> {
     check_dims(w, h)?;
     let mut bayer = normalize_raw(frame, w, h, stride, meta)?;
+    let clip = clip_weights(&bayer, w, h);
     if let Some(l) = lsc {
         apply_lsc(&mut bayer, w, h, meta.cfa, l);
     }
-    apply_wb(&mut bayer, w, meta.cfa, wb_gains(meta.neutral));
+    apply_wb_highlights(&mut bayer, w, meta.cfa, wb_gains(meta.neutral), &clip);
     let mut rgb = bin_quads(&bayer, w, h, meta.cfa);
     drop(bayer);
     apply_matrix(&mut rgb, &camera_to_srgb(meta));

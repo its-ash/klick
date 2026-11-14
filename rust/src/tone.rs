@@ -33,6 +33,7 @@ pub fn luma(r: f32, g: f32, b: f32) -> f32 {
 #[derive(Clone, Copy, Debug)]
 pub struct LumaStats {
     pub log_mean: f32,
+    pub p005: f32,
     pub p02: f32,
     pub p20: f32,
     pub p50: f32,
@@ -54,7 +55,7 @@ pub fn luma_stats(l: &Plane) -> LumaStats {
     let pct = |p: f32| v[((n as f32 - 1.0) * p) as usize];
     let log_mean = (v.iter().map(|x| (x + 1e-4).ln()).sum::<f32>() / n as f32).exp();
     let bright = v.iter().filter(|x| **x > 0.95).count() as f32 / n as f32;
-    LumaStats { log_mean, p02: pct(0.02), p20: pct(0.2), p50: pct(0.5), p99: pct(0.99), p999: pct(0.999), bright_frac: bright }
+    LumaStats { log_mean, p005: pct(0.005), p02: pct(0.02), p20: pct(0.2), p50: pct(0.5), p99: pct(0.99), p999: pct(0.999), bright_frac: bright }
 }
 
 /// Gentle global gain towards a mid-grey key. Never darkens by more than 1/1.4 or lifts by more than 2x.
@@ -66,6 +67,23 @@ pub fn auto_exposure_gain(stats: &LumaStats, scene: u8) -> f32 {
     let g = (target / stats.log_mean.max(1e-4)).clamp(0.7, 2.0);
     // Half the correction in log space: a hint, not a rewrite of the scene.
     g.sqrt()
+}
+
+/// Linear level the 20th luma percentile is lifted towards by the bright synthetic exposure.
+const SHADOW_TARGET: f32 = 0.06;
+
+/// Linear black point: a little below the darkest 0.5% of the image, so lens flare and veiling
+/// glare do not turn true blacks grey. Never more than 1.5% of full scale.
+pub fn black_point(stats_p005: f32) -> f32 {
+    (stats_p005 * 0.8).clamp(0.0, 0.015)
+}
+
+/// Global S-curve on display-referred values (0..1, endpoints fixed). `a` in 0..1 is the strength:
+/// slope 1 - a at black and white, 1 + a at mid grey, so it is always monotonic.
+#[inline]
+pub fn s_curve(y: f32, a: f32) -> f32 {
+    let y = y.clamp(0.0, 1.0);
+    y - a * (std::f32::consts::TAU * y).sin() / std::f32::consts::TAU
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,7 +101,9 @@ pub fn plan_fusion(stats: &LumaStats, scene: u8) -> FusionPlan {
         2 => 0.8,
         _ => 1.0,
     };
-    let bright_ev = ((0.22 / stats.p20.max(1e-3)).log2() * lift).clamp(0.0, 3.0);
+    // Lift the darkest fifth only to a dark-but-readable level (about 27% display grey). Lifting it
+    // to mid-grey is what makes HDR photos look flat and washed out.
+    let bright_ev = ((SHADOW_TARGET / stats.p20.max(1e-3)).log2() * lift).clamp(0.0, 2.5);
     let dark_ev = if stats.p99 > 0.85 || stats.bright_frac > 0.01 {
         -((stats.p99.max(0.85) / 0.8).log2() + 0.7).clamp(0.5, 3.0)
     } else {

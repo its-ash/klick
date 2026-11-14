@@ -20,13 +20,7 @@ const double moderateRms = 0.12;
 
 /// Live metering from the camera preview plus the gyroscope.
 class MeterInput {
-  const MeterInput({
-    required this.iso,
-    required this.exposureNs,
-    required this.aperture,
-    required this.shakeRms,
-    required this.maxIso,
-  });
+  const MeterInput({required this.iso, required this.exposureNs, required this.aperture, required this.shakeRms, required this.maxIso});
 
   final int iso;
   final int exposureNs;

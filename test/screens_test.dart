@@ -12,6 +12,20 @@ import 'package:klick/screens/viewer_screen.dart';
 import 'package:klick/settings/settings_store.dart';
 import 'package:theme/theme.dart';
 
+Map<String, dynamic> _infoMap(String lensId) => {
+  'textureId': lensId == '2' ? 2 : 1,
+  'previewWidth': 4,
+  'previewHeight': 3,
+  'sensorOrientation': 90,
+  'raw': true,
+  'flash': true,
+  'lensId': lensId,
+  'lenses': [
+    {'id': '2', 'label': '0.5x', 'zoom': 0.5},
+    {'id': '0', 'label': '1x', 'zoom': 1.0},
+  ],
+};
+
 class FakeCamera implements CameraApi {
   FakeCamera({this.permissionGranted = true, this.photos = const []});
 
@@ -28,16 +42,39 @@ class FakeCamera implements CameraApi {
   Future<bool> permission({bool location = false}) async => permissionGranted;
 
   @override
-  Future<CameraInfo> start({String? lensId}) async => const CameraInfo(
-        textureId: 1,
-        previewWidth: 4,
-        previewHeight: 3,
-        sensorOrientation: 90,
-        raw: true,
-        flash: true,
-        lensId: '0',
-        lenses: [Lens(id: '2', label: '0.5x', zoom: 0.5), Lens(id: '0', label: '1x', zoom: 1)],
-      );
+  Future<CameraInfo> start({String? lensId, bool autoMacro = true}) async => info(lensId ?? '0');
+
+  final selected = <String>[];
+
+  @override
+  Future<CameraInfo> selectLens(String lensId) async {
+    selected.add(lensId);
+    return info(lensId);
+  }
+
+  bool? autoMacro;
+
+  /// Report a main and a macro lens (the phone has a close-focusing ultrawide).
+  bool macro = false;
+
+  @override
+  Future<void> setAutoMacro(bool on) async => autoMacro = on;
+
+  CameraInfo info(String lensId) => CameraInfo(
+    mainLensId: macro ? '0' : null,
+    macroLensId: macro ? '2' : null,
+    textureId: lensId == '2' ? 2 : 1,
+    previewWidth: 4,
+    previewHeight: 3,
+    sensorOrientation: 90,
+    raw: true,
+    flash: true,
+    lensId: lensId,
+    lenses: const [
+      Lens(id: '2', label: '0.5x', zoom: 0.5),
+      Lens(id: '0', label: '1x', zoom: 1),
+    ],
+  );
 
   @override
   Future<void> stop() async => stops++;
@@ -94,7 +131,9 @@ void main() {
 
   testWidgets('shutter sends the settings to the camera', (tester) async {
     final cam = FakeCamera();
-    final settings = SettingsStore.memory()..setJpegQuality(90)..setKeepDng(false);
+    final settings = SettingsStore.memory()
+      ..setJpegQuality(90)
+      ..setKeepDng(false);
     await tester.pumpWidget(KlickApp(settings: settings, camera: cam));
     await tester.pump();
     await tester.pump();
@@ -116,6 +155,44 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('lens chips switch lens, and auto macro lens events swap the preview', (tester) async {
+    final cam = FakeCamera();
+    await tester.pumpWidget(KlickApp(settings: SettingsStore.memory(), camera: cam));
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.text('0.5x'));
+    await tester.pump();
+    expect(cam.selected, ['2']);
+    // Native auto macro switched back to the main lens and then to macro: the texture follows.
+    cam.controller.add({'type': 'lens', 'info': _infoMap('2'), 'macro': true});
+    await tester.pump();
+    expect(find.text('Macro'), findsOneWidget);
+    expect(tester.widget<Texture>(find.byType(Texture)).textureId, 2);
+    cam.controller.add({'type': 'lens', 'info': _infoMap('0'), 'macro': false});
+    await tester.pump();
+    expect(find.text('Macro'), findsNothing);
+    expect(tester.widget<Texture>(find.byType(Texture)).textureId, 1);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('phones with a macro lens get a Normal | Macro switch', (tester) async {
+    final cam = FakeCamera()..macro = true;
+    await tester.pumpWidget(KlickApp(settings: SettingsStore.memory(), camera: cam));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Normal'), findsOneWidget);
+    expect(find.text('Macro'), findsOneWidget);
+    // The macro lens is not repeated as a zoom chip.
+    expect(find.text('0.5x'), findsNothing);
+    await tester.tap(find.text('Macro'));
+    await tester.pump();
+    expect(cam.selected, ['2']);
+    await tester.tap(find.text('Normal'));
+    await tester.pump();
+    expect(cam.selected, ['2', '0']);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('denied permission shows a themed message with a retry', (tester) async {
     await tester.pumpWidget(KlickApp(settings: SettingsStore.memory(), camera: FakeCamera(permissionGranted: false)));
     await tester.pump();
@@ -127,7 +204,11 @@ void main() {
 
   testWidgets('settings screen has the options and ends with updates and developer', (tester) async {
     final settings = SettingsStore.memory();
-    await tester.pumpWidget(UiApp(home: SettingsScreen(settings: settings, camera: FakeCamera())));
+    await tester.pumpWidget(
+      UiApp(
+        home: SettingsScreen(settings: settings, camera: FakeCamera()),
+      ),
+    );
     await tester.pump(const Duration(milliseconds: 500));
     expect(find.text('Keep RAW (DNG)'), findsOneWidget);
     expect(find.text('Location tagging'), findsOneWidget);
@@ -153,15 +234,37 @@ void main() {
   });
 
   testWidgets('viewer offers before/after only when a reference frame exists', (tester) async {
-    await tester.pumpWidget(UiApp(home: ViewerScreen(photos: [photo('a', ref: '/tmp/a.jpg')], index: 0, camera: FakeCamera())));
+    await tester.pumpWidget(
+      UiApp(
+        home: ViewerScreen(
+          photos: [photo('a', ref: '/tmp/a.jpg')],
+          index: 0,
+          camera: FakeCamera(),
+        ),
+      ),
+    );
+    await tester.pump();
+    // The processed photo shows alone until Compare is tapped.
+    expect(find.text('Before'), findsNothing);
+    await tester.tap(find.byTooltip('Compare before and after'));
     await tester.pump();
     expect(find.text('Before'), findsOneWidget);
     expect(find.text('After'), findsOneWidget);
+    // Dragging the divider handle moves it.
+    final handle = find.byKey(const Key('compare-handle'));
+    final x0 = tester.getCenter(handle).dx;
+    await tester.drag(handle, const Offset(-120, 0));
+    await tester.pump();
+    expect(tester.getCenter(handle).dx, lessThan(x0 - 60));
     await tester.pumpWidget(const SizedBox());
-    await tester.pumpWidget(UiApp(home: ViewerScreen(photos: [photo('b')], index: 0, camera: FakeCamera())));
+    await tester.pumpWidget(
+      UiApp(
+        home: ViewerScreen(photos: [photo('b')], index: 0, camera: FakeCamera()),
+      ),
+    );
     await tester.pump();
     expect(find.text('Before'), findsNothing);
-    expect(find.text('No reference frame saved for this photo'), findsOneWidget);
+    expect(find.byTooltip('Compare before and after'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
 
