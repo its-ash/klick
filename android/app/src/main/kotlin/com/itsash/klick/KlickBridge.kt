@@ -32,7 +32,8 @@ class KlickBridge(private val activity: Activity, engine: FlutterEngine) : Metho
     private val processor = PhotoProcessor(activity) { e -> main.post { sink?.success(e) } }
     private val camera = CameraController(activity, engine.renderer, processor, shake) { e -> sink?.success(e) }
     private val io = Executors.newFixedThreadPool(2)
-    private val sound by lazy { MediaActionSound().apply { load(MediaActionSound.SHUTTER_CLICK) } }
+    private val soundLazy = lazy { MediaActionSound().apply { load(MediaActionSound.SHUTTER_CLICK) } }
+    private val sound by soundLazy
     private var permissionResult: MethodChannel.Result? = null
     private var permissionWantsLocation = false
 
@@ -47,6 +48,8 @@ class KlickBridge(private val activity: Activity, engine: FlutterEngine) : Metho
     fun dispose() {
         shake.stop()
         camera.release()
+        io.shutdownNow()
+        if (soundLazy.isInitialized()) runCatching { sound.release() }
     }
 
     fun onResume() = shake.start()
@@ -116,10 +119,19 @@ class KlickBridge(private val activity: Activity, engine: FlutterEngine) : Metho
 
     // ---- permissions ------------------------------------------------------------------------
 
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(activity, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(activity, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
     private fun requestPermissions(withLocation: Boolean, result: MethodChannel.Result) {
-        val needed = mutableListOf(Manifest.permission.CAMERA)
-        if (withLocation) needed += Manifest.permission.ACCESS_FINE_LOCATION
-        val missing = needed.filter { ContextCompat.checkSelfPermission(activity, it) != PackageManager.PERMISSION_GRANTED }
+        val missing = mutableListOf<String>()
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            missing += Manifest.permission.CAMERA
+        }
+        if (withLocation && !hasLocationPermission()) {
+            missing += Manifest.permission.ACCESS_FINE_LOCATION
+            missing += Manifest.permission.ACCESS_COARSE_LOCATION
+        }
         if (missing.isEmpty()) {
             result.success(true)
             return
@@ -136,13 +148,15 @@ class KlickBridge(private val activity: Activity, engine: FlutterEngine) : Metho
     fun onPermissionResult(requestCode: Int) {
         if (requestCode != REQUEST_CODE) return
         val cam = ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-        permissionResult?.success(cam)
+        val ok = cam && (!permissionWantsLocation || hasLocationPermission())
+        permissionResult?.success(ok)
         permissionResult = null
+        permissionWantsLocation = false
     }
 
     @Suppress("MissingPermission")
     private fun lastLocation(): Location? {
-        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return null
+        if (!hasLocationPermission()) return null
         val lm = activity.getSystemService(Activity.LOCATION_SERVICE) as LocationManager
         return lm.getProviders(true).mapNotNull { runCatching { lm.getLastKnownLocation(it) }.getOrNull() }.maxByOrNull { it.time }
     }

@@ -25,6 +25,7 @@ import android.util.Size
 import android.view.Surface
 import io.flutter.view.TextureRegistry
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -64,6 +65,7 @@ class CameraController(
         var captureSize = Size(0, 0)
         var previewSize = Size(0, 0)
         var ready = false
+        @Volatile var closed = false
 
         val callback = object : CameraCaptureSession.CaptureCallback() {
             override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
@@ -72,6 +74,7 @@ class CameraController(
         }
 
         fun close() {
+            closed = true
             runCatching { session?.stopRepeating() }
             runCatching { session?.close() }
             runCatching { device?.close() }
@@ -246,11 +249,15 @@ class CameraController(
 
     @SuppressLint("MissingPermission")
     private fun openRig(id: String, entry: TextureRegistry.SurfaceTextureEntry, primary: Boolean, cb: (Result<Map<String, Any?>>) -> Unit) {
+        val replied = AtomicBoolean(false)
+        val replyOnce: (Result<Map<String, Any?>>) -> Unit = { r ->
+            if (replied.compareAndSet(false, true)) cb(r)
+        }
         val rig = try {
             Rig(id, entry)
         } catch (t: Throwable) {
             if (primary) blockIfAuxiliary(id)
-            cb(Result.failure(t))
+            replyOnce(Result.failure(t))
             return
         }
         try {
@@ -286,27 +293,41 @@ class CameraController(
             if (primary) active = rig
             manager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
+                    if (rig.closed || rigs[id] !== rig) {
+                        runCatching { camera.close() }
+                        replyOnce(Result.failure(IllegalStateException("Camera closed")))
+                        return
+                    }
                     rig.device = camera
-                    createSession(rig, cb)
+                    createSession(rig, replyOnce)
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
                     camera.close(); rig.device = null; rig.ready = false
-                    if (rig === active) main.post { emit(mapOf("type" to "error", "message" to "Camera disconnected")) }
+                    if (replied.compareAndSet(false, true)) {
+                        cb(Result.failure(IllegalStateException("Camera disconnected")))
+                    } else if (rig === active) {
+                        main.post { emit(mapOf("type" to "error", "message" to "Camera disconnected")) }
+                    }
                 }
 
                 override fun onError(camera: CameraDevice, error: Int) {
+                    runCatching { camera.close() }
                     rig.close()
-                    rigs.remove(id)
+                    if (rigs[id] === rig) rigs.remove(id)
                     if (primary) blockIfAuxiliary(id) else dualAllowed = false
-                    cb(Result.failure(IllegalStateException("Camera error $error")))
+                    if (replied.compareAndSet(false, true)) {
+                        cb(Result.failure(IllegalStateException("Camera error $error")))
+                    } else if (rig === active) {
+                        main.post { emit(mapOf("type" to "error", "message" to "Camera error $error")) }
+                    }
                 }
             }, handler)
         } catch (t: Throwable) {
             rig.close()
-            rigs.remove(id)
+            if (rigs[id] === rig) rigs.remove(id)
             if (primary) blockIfAuxiliary(id) else dualAllowed = false
-            cb(Result.failure(t))
+            replyOnce(Result.failure(t))
         }
     }
 
@@ -323,6 +344,11 @@ class CameraController(
                 listOf(rig.previewSurface!!, rig.reader!!.surface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(s: CameraCaptureSession) {
+                        if (rig.closed || rigs[rig.id] !== rig) {
+                            runCatching { s.close() }
+                            cb(Result.failure(IllegalStateException("Camera closed")))
+                            return
+                        }
                         rig.session = s
                         rig.ready = true
                         startPreview(rig)
@@ -331,7 +357,9 @@ class CameraController(
 
                     override fun onConfigureFailed(s: CameraCaptureSession) {
                         if (rig !== active) {
-                            rig.close(); rigs.remove(rig.id); dualAllowed = false
+                            rig.close()
+                            if (rigs[rig.id] === rig) rigs.remove(rig.id)
+                            dualAllowed = false
                         }
                         cb(Result.failure(IllegalStateException("Could not configure the camera")))
                     }
@@ -529,11 +557,32 @@ class CameraController(
 
     private fun closeAll() {
         handler.removeCallbacks(restoreFocus)
+        val activeBurst = burst
+        val doneToFail = if (activeBurst != null) {
+            synchronized(activeBurst) {
+                activeBurst.fireTask?.let { handler.removeCallbacks(it) }
+                activeBurst.timeoutTask?.let { handler.removeCallbacks(it) }
+                activeBurst.fireTask = null
+                activeBurst.timeoutTask = null
+                if (!activeBurst.finished) {
+                    activeBurst.finished = true
+                    pendingDone
+                } else {
+                    null
+                }
+            }
+        } else {
+            null
+        }
+        burst = null
+        capturing = false
+        pendingPlan = null
+        pendingOpts = null
+        pendingDone = null
         rigs.values.forEach { it.close() }
         rigs.clear()
         active = null
-        burst = null
-        capturing = false
+        if (doneToFail != null) fail(doneToFail, "Camera closed")
     }
 
     fun release() {
@@ -600,6 +649,8 @@ class CameraController(
         val results = HashMap<Long, TotalCaptureResult>()
         var failed = 0
         var finished = false
+        var fireTask: Runnable? = null
+        var timeoutTask: Runnable? = null
     }
 
     class Frame(val timestamp: Long, val buffers: List<ByteBuffer>, val rowStride: Int, val yuvStrides: IntArray)
@@ -656,20 +707,37 @@ class CameraController(
                         }
                     }
                 }
+                val timeout = Runnable {
+                    synchronized(b) {
+                        if (!b.finished) {
+                            b.finished = true
+                            abortBurst(b, plan, opts, done)
+                        }
+                    }
+                }
                 val fire = Runnable {
+                    synchronized(b) {
+                        if (b.finished) return@Runnable
+                    }
                     try {
                         s.stopRepeating()
                         // The standby camera pauses during the burst so all bandwidth goes to the shot.
                         rigs.values.filter { it !== active }.forEach { r -> runCatching { r.session?.stopRepeating() } }
                         s.captureBurst(builders.map { it.build() }, callback, handler)
-                        handler.postDelayed({ synchronized(b) { if (!b.finished) { b.finished = true; abortBurst(b, plan, opts, done) } } }, 25_000)
+                        b.timeoutTask = timeout
+                        handler.postDelayed(timeout, 25_000)
                     } catch (t: Throwable) {
-                        capturing = false
-                        burst = null
-                        startPreviewSafe()
-                        fail(done, t.message ?: "Capture failed")
+                        val shouldReply = synchronized(b) {
+                            if (b.finished) false else { b.finished = true; true }
+                        }
+                        if (shouldReply) {
+                            clearBurst(b)
+                            startPreviewSafe()
+                            fail(done, t.message ?: "Capture failed")
+                        }
                     }
                 }
+                b.fireTask = fire
                 if (useFlash) {
                     runPrecapture(s)
                     handler.postDelayed(fire, 800)
@@ -677,10 +745,14 @@ class CameraController(
                     fire.run()
                 }
             } catch (t: Throwable) {
-                capturing = false
-                burst = null
-                startPreviewSafe()
-                fail(done, t.message ?: "Capture failed")
+                val shouldReply = synchronized(b) {
+                    if (b.finished) false else { b.finished = true; true }
+                }
+                if (shouldReply) {
+                    clearBurst(b)
+                    startPreviewSafe()
+                    fail(done, t.message ?: "Capture failed")
+                }
             }
         }
     }
@@ -787,7 +859,11 @@ class CameraController(
             abortBurst(b, plan, opts, done)
             return
         }
-        val c = chars!!
+        val c = chars
+        if (c == null) {
+            abortBurst(b, plan, opts, done)
+            return
+        }
         val sensorOrientation = c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         val jpegOrientation = (sensorOrientation + shake.deviceRotation) % 360
         val job = BurstJob(
@@ -809,17 +885,28 @@ class CameraController(
             aperture = lastResult?.get(CaptureResult.LENS_APERTURE) ?: 0f,
             focalLength = lastResult?.get(CaptureResult.LENS_FOCAL_LENGTH) ?: 0f,
         )
-        burst = null
-        capturing = false
-        pendingPlan = null; pendingOpts = null; pendingDone = null
+        clearBurst(b)
         startPreviewSafe()
         processor.submit(job)
         main.post { done(Result.success(mapOf("id" to job.id, "frames" to ordered.size, "scene" to plan.scene.label, "raw" to b.raw))) }
     }
 
+    private fun clearBurst(b: Burst) {
+        b.fireTask?.let { handler.removeCallbacks(it) }
+        b.timeoutTask?.let { handler.removeCallbacks(it) }
+        b.fireTask = null
+        b.timeoutTask = null
+        if (burst === b) {
+            burst = null
+            capturing = false
+            pendingPlan = null
+            pendingOpts = null
+            pendingDone = null
+        }
+    }
+
     private fun abortBurst(b: Burst, plan: ScenePlanner.Plan, opts: Options, done: (Result<Map<String, Any?>>) -> Unit) {
-        burst = null
-        capturing = false
+        clearBurst(b)
         startPreviewSafe()
         main.post { done(Result.failure(IllegalStateException("The burst did not complete"))) }
     }

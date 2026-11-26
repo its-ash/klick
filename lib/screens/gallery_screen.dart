@@ -49,6 +49,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
             ),
             itemCount: photos.length,
             itemBuilder: (context, i) => _Thumb(
+              key: ValueKey(photos[i].uri),
               photo: photos[i],
               camera: widget.camera,
               onTap: () async {
@@ -68,7 +69,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
 }
 
 class _Thumb extends StatefulWidget {
-  const _Thumb({required this.photo, required this.camera, required this.onTap});
+  const _Thumb({super.key, required this.photo, required this.camera, required this.onTap});
 
   final Photo photo;
   final CameraApi camera;

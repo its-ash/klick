@@ -82,7 +82,9 @@ class SettingsScreen extends StatelessWidget {
                   value: settings.locationTag,
                   onChanged: (v) async {
                     settings.setLocationTag(v);
-                    if (v) await camera.permission(location: true);
+                    if (v && !await camera.permission(location: true)) {
+                      settings.setLocationTag(false);
+                    }
                   },
                 ),
                 const UiListTile(
