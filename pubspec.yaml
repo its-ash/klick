@@ -1,7 +1,7 @@
 name: klick
 description: "Klick: a fully automatic camera. RAW bursts merged by a native Rust engine."
 publish_to: 'none'
-version: 1.0.4+5
+version: 1.0.5+6
 
 environment:
   sdk: ^3.12.2
