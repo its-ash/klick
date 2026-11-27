@@ -655,7 +655,7 @@ class CameraController(
 
     class Frame(val timestamp: Long, val buffers: List<ByteBuffer>, val rowStride: Int, val yuvStrides: IntArray)
 
-    class Options(val flash: String, val quality: Int, val keepDng: Boolean, val location: Location?)
+    class Options(val flash: String, val quality: Int, val keepDng: Boolean, val location: Location?, val look: String = "pro")
 
     fun capture(opts: Options, done: (Result<Map<String, Any?>>) -> Unit) {
         handler.post {
@@ -772,7 +772,11 @@ class CameraController(
         b.addTarget(rd.surface)
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
         b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-        b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        // Lock AWB across burst frames so color temperature never drifts mid-burst.
+        if (!flash) b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
+        // Keep focus steady during the burst once locked, avoiding mid-burst AF hunting.
+        val afMode = if (focused(lastResult)) CaptureRequest.CONTROL_AF_MODE_AUTO else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+        b.set(CaptureRequest.CONTROL_AF_MODE, afMode)
         b.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE_ON)
         if (flash) {
             b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH)
@@ -884,6 +888,7 @@ class CameraController(
             location = opts.location,
             aperture = lastResult?.get(CaptureResult.LENS_APERTURE) ?: 0f,
             focalLength = lastResult?.get(CaptureResult.LENS_FOCAL_LENGTH) ?: 0f,
+            look = opts.look,
         )
         clearBurst(b)
         startPreviewSafe()

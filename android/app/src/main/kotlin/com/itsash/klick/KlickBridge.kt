@@ -83,6 +83,7 @@ class KlickBridge(private val activity: Activity, engine: FlutterEngine) : Metho
                     call.argument<Int>("quality") ?: 95,
                     call.argument<Boolean>("keepDng") ?: true,
                     loc,
+                    call.argument<String>("look") ?: "pro",
                 )
                 camera.capture(opts) { r -> reply(result, r) }
             }

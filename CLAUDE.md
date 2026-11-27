@@ -14,26 +14,35 @@ into one JPEG. The Flutter UI is a viewfinder, a gallery with before/after, and 
    analog maximum) to compensate. `evGain` is the digital gain that restores the under-exposure.
    Auto flash (EV < 2.5, flash available) shoots a single flash frame.
 2. **Capture** (`CameraController.kt`, Camera2): preview into a Flutter `Texture`, continuous
-   AF/AE/AWB, tap to focus. Bursts use manual exposure/ISO, NR and edge off for RAW, lens shading
-   map on. Frames are copied into direct ByteBuffers (memory budget in `PhotoProcessor`).
+   AF/AE/AWB, tap to focus. Bursts use manual exposure/ISO with AWB locked and AF frozen when
+   already sharp, NR and edge off for RAW, lens shading map on, and HAL exposure-glitch frames
+   dropped before merge (`PhotoProcessor.kt`). Frames are copied into direct ByteBuffers.
 3. **Engine** (`rust/`, crate `klick-engine`, JNI in `jni_api.rs`, called by `NativeEngine.kt`):
-   - `align.rs`: Gaussian pyramid of the 2x2-binned grey, coarse-to-fine 16 px tiles (L2 coarse,
-     L1 fine), whole-pixel offsets in the binned grid (so always CFA-aligned). Reference = sharpest of
-     the first three frames.
-   - `merge.rs`: tile merge with a Wiener-like weight from the noise profile (difference-to-noise),
-     tile and pixel ghost rejection, Hann-window tiles at 50% overlap.
-   - `raw.rs`, `demosaic.rs`, `color.rs`: black/white level, lens shading map, as-shot white balance
-     with a small grey-world refinement, Malvar-He-Cutler demosaic (sensors over 17 MP are 2x2
-     quad-binned instead), DNG-style forward matrix interpolation to linear sRGB.
-   - `tone.rs`: histogram-driven auto exposure and HDR plan; Mertens exposure fusion on a luma
-     thumbnail, applied to the full image as a smooth gain map; highlight roll-off.
-   - `denoise.rs`, `sharpen.rs`: bilateral luma, cross-bilateral chroma, both scaled by the noise
-     model, ISO and gain; unsharp with coring and halo limit, local contrast, vibrance.
-   - `encode.rs`: JPEG (`jpeg-encoder`). `finish.rs` and `pipeline.rs` compose the stages; every stage
-     is a pure function over plain buffers with host unit tests.
-4. **Save** (`PhotoProcessor.kt`): EXIF via `androidx.exifinterface`, MediaStore `Pictures/Klick`,
-   optional DNG of the reference frame (`DngCreator`), a half-size render of the reference frame in
-   `files/refs/` for before/after.
+   - `align.rs`: Gaussian pyramid of 2x2-binned grey, 3-candidate Hasinoff coarse-to-fine 16 px
+     tiles with 3x3 median outlier regularization and sub-pixel parabola refinement. Reference =
+     sharpest of the first three frames by noise-smoothed 2D Tenengrad.
+   - `merge.rs`: HDR+ 16x16 orthonormal 2D-DCT frequency-domain Wiener merge across the four
+     phase-locked Bayer sub-planes with sub-pixel Catmull-Rom alignment, tile ghost gating, mild
+     residual spatial cleaning, and 50%-overlap Hann synthesis.
+   - `raw.rs`, `demosaic.rs`, `color.rs`: black/white level, hot/dead pixel despeckle, Gr/Gb
+     green equilibration, lens shading map, neutral-anchor WB refinement, color-preserving highlight
+     reconstruction, 3-pass directional Hamilton-Adams demosaic with chromatic false-color
+     suppression (sensors over 17 MP use spatially co-registered 2x2 quad binning), DNG forward
+     matrix + calibration/color-matrix Bradford fallback to linear sRGB.
+   - `tone.rs`: key-aware auto exposure, adaptive black point, Mertens exposure fusion projected
+     through an edge-preserving Fast Guided Filter gain map (zero halos), and AgX-inspired filmic
+     highlight rolloff.
+   - `denoise.rs`, `sharpen.rs`, `finish.rs`: perceptual OkLab/OkLCh finishing with 5 looks
+     (`Pro`, `Natural`, `Vivid`, `Film`, `Mono`), Inter-Scale BiShrink wavelet luma/chroma denoise,
+     guided chroma upsampling, halo-free guided clarity, per-pixel noise-masked dual-scale
+     sharpening, skin-protected vibrance, sky/foliage color harmony, exact OkLCh gamut mapping,
+     and 1-LSB sky-band dithering.
+   - `encode.rs`: JPEG (`jpeg-encoder`) with 4:4:4 chroma at quality >= 95, 4:2:2 at >= 90,
+     optimized Huffman tables. `pipeline.rs` composes the stages; every stage is a pure function
+     over plain buffers with host unit tests.
+4. **Save** (`PhotoProcessor.kt`): EXIF (with sRGB color space & active look) via
+   `androidx.exifinterface`, MediaStore `Pictures/Klick`, optional DNG of the reference frame
+   (`DngCreator`), a half-size render of the reference frame in `files/refs/` for before/after.
 
 Metadata passes as one float array: layout in `rust/src/meta.rs`, built by `EngineMeta.kt`.
 

@@ -1,14 +1,17 @@
 //! The whole engine for one burst: RAW (Bayer) or YUV in, JPEG bytes out.
 
-use crate::align::{align, build_pyramid, pick_reference, LEVELS};
+use crate::align::{align, build_pyramid, pick_reference, Offsets, LEVELS};
 use crate::color::{apply_matrix, camera_to_srgb};
-use crate::demosaic::{bin_quads, demosaic_mhc, Rgb};
+use crate::demosaic::{bin_quads, demosaic_pro, Rgb};
 use crate::encode::encode_jpeg;
 use crate::finish::{finish, quick_srgb8, FinishInfo, FinishParams};
 use crate::merge::{Merger, NoiseModel};
-use crate::meta::Meta;
+use crate::meta::{Meta, PhotoLook};
 use crate::plane::{box_downsample, resize_bilinear, Plane};
-use crate::raw::{apply_lsc, apply_wb_highlights, bin_grey, clip_weights, normalize_raw, refine_wb, wb_gains, Lsc};
+use crate::raw::{
+    apply_lsc, apply_wb_highlights, apply_wb_reconstruct, bin_grey, channel_clip_masks, clip_weights, despeckle_raw,
+    equilibrate_green, normalize_raw, refine_wb, wb_gains, Lsc,
+};
 use crate::tone::srgb_decode;
 use rayon::prelude::*;
 
@@ -27,25 +30,43 @@ pub struct Processed {
 pub const DEFAULT_MAX_PIXELS: usize = 17_000_000;
 
 /// Align and merge a burst of already normalised planes. `load(i)` returns frame i as a
-/// Bayer/luma plane; `grey(i)` its binned grey (computed once per frame by the caller).
-/// Returns the merged plane and the reference index.
-pub fn merge_burst<F>(n: usize, load: F, greys: &[Plane], w: usize, h: usize, noise: &NoiseModel) -> Result<(Vec<f32>, usize), String>
+/// Bayer/luma plane; `greys[i]` its binned grey (computed once per frame by the caller).
+/// Returns `(merged_plane, ref_index, per_alt_offsets)`.
+pub fn merge_burst_with_offsets<F>(
+    n: usize,
+    load: F,
+    greys: &[Plane],
+    w: usize,
+    h: usize,
+    noise: &NoiseModel,
+) -> Result<(Vec<f32>, usize, Vec<(usize, Offsets)>), String>
 where
     F: Fn(usize) -> Result<Vec<f32>, String>,
 {
     let ref_idx = pick_reference(greys, 3);
     let refp = load(ref_idx)?;
     if n == 1 {
-        return Ok((refp, ref_idx));
+        return Ok((refp, ref_idx, Vec::new()));
     }
     let ref_pyr = build_pyramid(&greys[ref_idx], LEVELS);
     let mut merger = Merger::new(w, h, 32);
+    let mut all_offs = Vec::with_capacity(n - 1);
     for k in (0..n).filter(|k| *k != ref_idx) {
         let alt = load(k)?;
         let offs = align(&ref_pyr, &build_pyramid(&greys[k], LEVELS));
         merger.add(&refp, &alt, &offs, 2, noise);
+        all_offs.push((k, offs));
     }
-    Ok((merger.finish(&refp), ref_idx))
+    Ok((merger.finish(&refp), ref_idx, all_offs))
+}
+
+/// Convenience wrapper returning `(merged_plane, ref_index)`.
+pub fn merge_burst<F>(n: usize, load: F, greys: &[Plane], w: usize, h: usize, noise: &NoiseModel) -> Result<(Vec<f32>, usize), String>
+where
+    F: Fn(usize) -> Result<Vec<f32>, String>,
+{
+    let (m, r, _) = merge_burst_with_offsets(n, load, greys, w, h, noise)?;
+    Ok((m, r))
 }
 
 fn check_dims(w: usize, h: usize) -> Result<(), String> {
@@ -55,23 +76,37 @@ fn check_dims(w: usize, h: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Merged, normalised Bayer to linear sRGB (stage 3).
+/// Merged, normalised Bayer to linear sRGB (stage 3):
+/// hot/dead pixel removal -> Gr/Gb green equilibration -> per-channel clip detection ->
+/// lens shading correction -> neutral-anchor WB refinement -> color-preserving highlight
+/// reconstruction -> edge-adaptive pro demosaic (or co-registered quad binning) -> DNG color matrix.
 pub fn develop_bayer(mut bayer: Vec<f32>, w: usize, h: usize, meta: &Meta, lsc: Option<&Lsc>, max_pixels: usize) -> Rgb {
-    // Clipping is judged on the sensor values, before lens shading lifts the corners.
-    let clip = clip_weights(&bayer, w, h);
+    despeckle_raw(&mut bayer, w, h, &meta.noise);
+    equilibrate_green(&mut bayer, w, h, meta.cfa);
+    // Clipping is judged per channel on the raw sensor values, before lens shading lifts the corners.
+    let masks = channel_clip_masks(&bayer, w, h, meta.cfa);
     if let Some(l) = lsc {
         apply_lsc(&mut bayer, w, h, meta.cfa, l);
     }
     let base = wb_gains(meta.neutral);
     let gains = refine_wb(&bayer, w, h, meta.cfa, base);
-    apply_wb_highlights(&mut bayer, w, meta.cfa, gains, &clip);
-    let mut rgb = if w * h > max_pixels { bin_quads(&bayer, w, h, meta.cfa) } else { demosaic_mhc(&bayer, w, h, meta.cfa) };
+    apply_wb_reconstruct(&mut bayer, w, meta.cfa, gains, &masks);
+    let mut rgb = if w * h > max_pixels { bin_quads(&bayer, w, h, meta.cfa) } else { demosaic_pro(&bayer, w, h, meta.cfa) };
     drop(bayer);
     apply_matrix(&mut rgb, &camera_to_srgb(meta));
     rgb
 }
 
-pub fn process_raw(frames: &[&[u8]], w: usize, h: usize, stride: usize, meta: &Meta, lsc: Option<&Lsc>, quality: u8, max_pixels: usize) -> Result<Processed, String> {
+pub fn process_raw(
+    frames: &[&[u8]],
+    w: usize,
+    h: usize,
+    stride: usize,
+    meta: &Meta,
+    lsc: Option<&Lsc>,
+    quality: u8,
+    max_pixels: usize,
+) -> Result<Processed, String> {
     check_dims(w, h)?;
     if frames.is_empty() {
         return Err("no frames".into());
@@ -86,7 +121,14 @@ pub fn process_raw(frames: &[&[u8]], w: usize, h: usize, stride: usize, meta: &M
     drop(greys);
     let rgb = develop_bayer(merged, w, h, meta, lsc, max_pixels);
     let (ow, oh) = (rgb.w, rgb.h);
-    let params = FinishParams { scene: meta.scene, ev_gain: meta.ev_gain, noise: meta.noise, frames: n, display_referred: false };
+    let params = FinishParams {
+        scene: meta.scene,
+        ev_gain: meta.ev_gain,
+        noise: meta.noise,
+        frames: n,
+        display_referred: false,
+        look: PhotoLook::from_u8(meta.look),
+    };
     let (rgb8, info) = finish(rgb, &params);
     let jpeg = encode_jpeg(&rgb8, ow, oh, quality)?;
     Ok(Processed { jpeg, width: ow, height: oh, frames: n, ref_index, info })
@@ -185,21 +227,26 @@ pub fn process_yuv(frames: &[YuvFrame], layout: &YuvLayout, meta: &Meta, quality
     }
     let noise = meta.noise;
     let chroma_noise = NoiseModel { s: noise.s * 2.0, o: noise.o * 2.0 };
-    let (y_merged, ref_idx) = merge_burst(n, |i| read_y(&frames[i], layout), &greys, w, h, &noise)?;
-    // Chroma planes use the same offsets as luma (scale 1 at half resolution).
+    // Compute alignment offsets once and reuse them across Y, U, and V!
+    let (y_merged, ref_idx, all_offs) = merge_burst_with_offsets(n, |i| read_y(&frames[i], layout), &greys, w, h, &noise)?;
+    drop(greys);
     let (cw, ch) = (w / 2, h / 2);
-    let ref_pyr = build_pyramid(&greys[ref_idx], LEVELS);
     let (u_ref, v_ref) = (read_chroma(frames[ref_idx].u, layout)?, read_chroma(frames[ref_idx].v, layout)?);
     let (mut mu, mut mv) = (Merger::new(cw, ch, 16), Merger::new(cw, ch, 16));
-    for k in (0..n).filter(|k| *k != ref_idx) {
-        let offs = align(&ref_pyr, &build_pyramid(&greys[k], LEVELS));
-        mu.add(&u_ref, &read_chroma(frames[k].u, layout)?, &offs, 1, &chroma_noise);
-        mv.add(&v_ref, &read_chroma(frames[k].v, layout)?, &offs, 1, &chroma_noise);
+    for (k, offs) in &all_offs {
+        mu.add(&u_ref, &read_chroma(frames[*k].u, layout)?, offs, 1, &chroma_noise);
+        mv.add(&v_ref, &read_chroma(frames[*k].v, layout)?, offs, 1, &chroma_noise);
     }
-    drop(greys);
     let (u, v) = (mu.finish(&u_ref), mv.finish(&v_ref));
     let rgb = yuv_to_linear(&y_merged, Plane::from_vec(cw, ch, u), Plane::from_vec(cw, ch, v), w, h);
-    let params = FinishParams { scene: meta.scene, ev_gain: 1.0, noise, frames: n, display_referred: true };
+    let params = FinishParams {
+        scene: meta.scene,
+        ev_gain: 1.0,
+        noise,
+        frames: n,
+        display_referred: true,
+        look: PhotoLook::from_u8(meta.look),
+    };
     let (rgb8, info) = finish(rgb, &params);
     let jpeg = encode_jpeg(&rgb8, w, h, quality)?;
     Ok(Processed { jpeg, width: w, height: h, frames: n, ref_index: ref_idx, info })
@@ -228,7 +275,6 @@ mod tests {
     use crate::meta::cfa_color;
     use crate::testutil::{textured, Rng};
 
-    /// Ground-truth scene as linear RGB planes (mildly coloured texture).
     fn truth(w: usize, h: usize) -> [Plane; 3] {
         let t = textured(w, h);
         let k = [0.9f32, 1.0, 0.7];
@@ -272,7 +318,6 @@ mod tests {
         let greys: Vec<Plane> = frames.iter().map(|f| bin_grey(f, w, h)).collect();
         let noise = NoiseModel { s: 0.0, o: sigma * sigma };
         let (merged, ref_idx) = merge_burst(frames.len(), |i| Ok(frames[i].clone()), &greys, w, h, &noise).unwrap();
-        // Truth in the reference frame's coordinates.
         let (rx, ry) = shifts[ref_idx];
         let want = mosaic_of(&t, rx, ry, w, h);
         let mse = |a: &[f32]| {
@@ -288,7 +333,7 @@ mod tests {
             s / n as f32
         };
         let (single, merged_mse) = (mse(&frames[ref_idx]), mse(&merged));
-        assert!(merged_mse < single / 2.5, "single {} merged {}", single, merged_mse);
+        assert!(merged_mse < single / 3.0, "single {} merged {}", single, merged_mse);
     }
 
     #[test]

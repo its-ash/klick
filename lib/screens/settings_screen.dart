@@ -58,6 +58,24 @@ class SettingsScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Text('Photo look', style: context.text.titleSmall),
+                  const UiGap(UiSpace.sm),
+                  UiChoiceChips<PhotoLook>(
+                    options: [for (final l in PhotoLook.values) UiChoice(l, l.label)],
+                    value: settings.look,
+                    onChanged: settings.setLook,
+                  ),
+                  const UiGap(UiSpace.xs),
+                  Text(settings.look.description, style: context.text.bodySmall),
+                ],
+              ),
+            ),
+            const UiGap(UiSpace.lg),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: UiSpace.xs),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Text('JPEG quality', style: context.text.titleSmall),
                   const UiGap(UiSpace.sm),
                   UiSegmentedControl(
@@ -67,7 +85,7 @@ class SettingsScreen extends StatelessWidget {
                     onChanged: settings.setJpegQuality,
                   ),
                   const UiGap(UiSpace.xs),
-                  Text('Higher is larger. 95 is the best balance.', style: context.text.bodySmall),
+                  Text('95+ saves full 4:4:4 chroma. 95 is the best balance.', style: context.text.bodySmall),
                 ],
               ),
             ),

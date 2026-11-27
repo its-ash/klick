@@ -89,6 +89,7 @@ abstract class CameraApi {
     required bool keepDng,
     required bool sound,
     required bool location,
+    String look = 'pro',
   });
 
   /// Native events: `scene` metering ticks, `job` queue updates, `lens` (auto macro switched the
@@ -146,6 +147,7 @@ class CameraChannel implements CameraApi {
     required bool keepDng,
     required bool sound,
     required bool location,
+    String look = 'pro',
   }) async {
     final m = await _method.invokeMapMethod<String, dynamic>('capture', {
       'flash': flash,
@@ -153,6 +155,7 @@ class CameraChannel implements CameraApi {
       'keepDng': keepDng,
       'sound': sound,
       'location': location,
+      'look': look,
     });
     return CaptureAck(
       id: (m?['id'] as num?)?.toInt() ?? 0,

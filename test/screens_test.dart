@@ -89,8 +89,9 @@ class FakeCamera implements CameraApi {
     required bool keepDng,
     required bool sound,
     required bool location,
+    String look = 'pro',
   }) async {
-    captures.add({'flash': flash, 'quality': quality, 'keepDng': keepDng});
+    captures.add({'flash': flash, 'quality': quality, 'keepDng': keepDng, 'look': look});
     return const CaptureAck(id: 1, frames: 4, scene: 'normal');
   }
 
@@ -133,14 +134,19 @@ void main() {
     final cam = FakeCamera();
     final settings = SettingsStore.memory()
       ..setJpegQuality(90)
-      ..setKeepDng(false);
+      ..setKeepDng(false)
+      ..setLook(PhotoLook.film);
     await tester.pumpWidget(KlickApp(settings: settings, camera: cam));
     await tester.pump();
     await tester.pump();
+    expect(find.bySemanticsLabel('Photo look: Film'), findsOneWidget);
+    await tester.tap(find.bySemanticsLabel('Photo look: Film'));
+    await tester.pump();
+    expect(settings.look, PhotoLook.mono);
     await tester.tap(find.bySemanticsLabel('Take photo'));
     await tester.pump();
     await tester.pump();
-    expect(cam.captures.single, {'flash': 'auto', 'quality': 90, 'keepDng': false});
+    expect(cam.captures.single, {'flash': 'auto', 'quality': 90, 'keepDng': false, 'look': 'mono'});
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -272,10 +278,13 @@ void main() {
     final s = SettingsStore.memory();
     expect(s.keepDng, isTrue);
     expect(s.jpegQuality, 95);
+    expect(s.look, PhotoLook.pro);
     expect(s.shutterSound, isTrue);
     expect(s.grid, isFalse);
     expect(s.locationTag, isFalse);
     s.setJpegQuality(77);
     expect(s.jpegQuality, 95);
+    s.cycleLook();
+    expect(s.look, PhotoLook.natural);
   });
 }

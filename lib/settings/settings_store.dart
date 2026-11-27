@@ -1,11 +1,28 @@
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Finishing grade applied by the native processing engine.
+enum PhotoLook {
+  pro('Pro', 'Editorial contrast, rich skies, protected skin tones.'),
+  natural('Natural', 'True-to-life color with gentle contrast and neutral tones.'),
+  vivid('Vivid', 'Punchy color and deeper contrast for bold scenes.'),
+  film('Film', 'Warm highlights, lifted shadows, soft analog color.'),
+  mono('Mono', 'Rich monochrome with deep blacks and crisp micro-contrast.');
+
+  const PhotoLook(this.label, this.description);
+
+  final String label;
+  final String description;
+
+  static PhotoLook parse(String? name) => values.firstWhere((v) => v.name == name, orElse: () => PhotoLook.pro);
+}
+
 /// Camera options, saved with `shared_preferences`.
 class SettingsStore extends ChangeNotifier {
   SettingsStore._(this._prefs)
     : _keepDng = _prefs?.getBool(_kKeepDng) ?? true,
       _quality = _prefs?.getInt(_kQuality) ?? 95,
+      _look = PhotoLook.parse(_prefs?.getString(_kLook)),
       _shutterSound = _prefs?.getBool(_kSound) ?? true,
       _grid = _prefs?.getBool(_kGrid) ?? false,
       _locationTag = _prefs?.getBool(_kLocation) ?? false,
@@ -16,6 +33,7 @@ class SettingsStore extends ChangeNotifier {
     : _prefs = null,
       _keepDng = true,
       _quality = 95,
+      _look = PhotoLook.pro,
       _shutterSound = true,
       _grid = false,
       _locationTag = false,
@@ -23,6 +41,7 @@ class SettingsStore extends ChangeNotifier {
 
   static const _kKeepDng = 'keep_dng';
   static const _kQuality = 'jpeg_quality';
+  static const _kLook = 'photo_look';
   static const _kSound = 'shutter_sound';
   static const _kGrid = 'grid';
   static const _kLocation = 'location_tag';
@@ -36,6 +55,7 @@ class SettingsStore extends ChangeNotifier {
   final SharedPreferences? _prefs;
   bool _keepDng;
   int _quality;
+  PhotoLook _look;
   bool _shutterSound;
   bool _grid;
   bool _locationTag;
@@ -43,6 +63,7 @@ class SettingsStore extends ChangeNotifier {
 
   bool get keepDng => _keepDng;
   int get jpegQuality => _quality;
+  PhotoLook get look => _look;
   bool get shutterSound => _shutterSound;
   bool get grid => _grid;
   bool get locationTag => _locationTag;
@@ -61,6 +82,17 @@ class SettingsStore extends ChangeNotifier {
     _quality = qualities.contains(v) ? v : 95;
     _prefs?.setInt(_kQuality, _quality);
     notifyListeners();
+  }
+
+  void setLook(PhotoLook v) {
+    _look = v;
+    _prefs?.setString(_kLook, v.name);
+    notifyListeners();
+  }
+
+  void cycleLook() {
+    final all = PhotoLook.values;
+    setLook(all[(_look.index + 1) % all.length]);
   }
 
   void setShutterSound(bool v) {

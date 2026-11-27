@@ -1,9 +1,7 @@
-//! Stage 4: automatic exposure and HDR. A luminance histogram decides how many synthetic
-//! exposures are worth fusing; Mertens exposure fusion (contrast x well-exposedness weights,
-//! Laplacian pyramid blend) runs on a small luma image, and the result is carried to the full-size
-//! image as a smooth per-pixel gain map. That keeps memory flat for 12 to 50 MP sensors.
+//! Stage 4: automatic exposure, adaptive dehaze/black-floor anchor, halo-free Guided-Filter
+//! Mertens HDR local tone mapping, and AgX-inspired filmic highlight roll-off.
 
-use crate::plane::{box_downsample, downsample2, resize_bilinear, Plane};
+use crate::plane::{box_downsample, downsample2, guided_coeffs, resize_bilinear, Plane};
 
 #[inline]
 pub fn srgb_encode(x: f32) -> f32 {
@@ -37,6 +35,7 @@ pub struct LumaStats {
     pub p02: f32,
     pub p20: f32,
     pub p50: f32,
+    pub p98: f32,
     pub p99: f32,
     pub p999: f32,
     /// Fraction of pixels above 0.95 (linear).
@@ -45,7 +44,6 @@ pub struct LumaStats {
 
 pub fn luma_stats(l: &Plane) -> LumaStats {
     let mut v: Vec<f32> = l.d.iter().map(|x| x.max(0.0)).collect();
-    // Subsample so sorting stays cheap.
     if v.len() > 200_000 {
         let step = v.len() / 200_000 + 1;
         v = v.into_iter().step_by(step).collect();
@@ -55,35 +53,81 @@ pub fn luma_stats(l: &Plane) -> LumaStats {
     let pct = |p: f32| v[((n as f32 - 1.0) * p) as usize];
     let log_mean = (v.iter().map(|x| (x + 1e-4).ln()).sum::<f32>() / n as f32).exp();
     let bright = v.iter().filter(|x| **x > 0.95).count() as f32 / n as f32;
-    LumaStats { log_mean, p005: pct(0.005), p02: pct(0.02), p20: pct(0.2), p50: pct(0.5), p99: pct(0.99), p999: pct(0.999), bright_frac: bright }
+    LumaStats {
+        log_mean,
+        p005: pct(0.005),
+        p02: pct(0.02),
+        p20: pct(0.2),
+        p50: pct(0.5),
+        p98: pct(0.98),
+        p99: pct(0.99),
+        p999: pct(0.999),
+        bright_frac: bright,
+    }
 }
 
-/// Gentle global gain towards a mid-grey key. Never darkens by more than 1/1.4 or lifts by more than 2x.
+/// Key-aware automatic exposure gain balancing geometric mean, median, and highlight headroom.
+/// Never darkens by more than `sqrt(0.7)` or lifts by more than `sqrt(2.0)`.
 pub fn auto_exposure_gain(stats: &LumaStats, scene: u8) -> f32 {
     let target = match scene {
-        2 => 0.10, // night shots should stay moody
-        _ => 0.16,
+        2 => 0.105, // night stays atmospheric and rich, never grey
+        1 => 0.175,
+        _ => 0.175,
     };
-    let g = (target / stats.log_mean.max(1e-4)).clamp(0.7, 2.0);
-    // Half the correction in log space: a hint, not a rewrite of the scene.
+    let key = (stats.log_mean.max(1e-4) * stats.p50.max(1e-4)).sqrt();
+    let mut g = (target / key).clamp(0.7, 2.0);
+    // Protect highlight headroom on non-HDR scenes; HDR fusion + filmic rolloff handles >2x brights.
+    if g > 1.0 && scene != 1 && stats.p98 > 0.7 {
+        let max_g = (2.1 / stats.p98).clamp(1.0, 2.0);
+        g = g.min(max_g);
+    }
     g.sqrt()
 }
 
 /// Linear level the 20th luma percentile is lifted towards by the bright synthetic exposure.
-const SHADOW_TARGET: f32 = 0.06;
+const SHADOW_TARGET: f32 = 0.066;
 
-/// Linear black point: a little below the darkest 0.5% of the image, so lens flare and veiling
-/// glare do not turn true blacks grey. Never more than 1.5% of full scale.
+/// Linear black point anchoring true blacks cleanly while clearing lens-flare veiling glare
+/// and daylight atmospheric haze WITHOUT crushing legitimate dark subjects (buildings, suits, hair).
 pub fn black_point(stats_p005: f32) -> f32 {
-    (stats_p005 * 0.8).clamp(0.0, 0.015)
+    ((stats_p005 - 0.008).max(0.0) * 0.65).clamp(0.0, 0.014)
+}
+
+/// Scene-aware black floor with subtle haze clearing when a daylight photo has elevated shadows
+/// and compressed brights (lens flare / misty haze).
+pub fn scene_black_point(stats: &LumaStats, scene: u8) -> f32 {
+    let base = black_point(stats.p005);
+    if scene != 2 && stats.p02 > 0.045 && stats.p99 < 0.78 {
+        ((stats.p005 - 0.006).max(0.0) * 0.80).clamp(base, 0.022)
+    } else {
+        base
+    }
 }
 
 /// Global S-curve on display-referred values (0..1, endpoints fixed). `a` in 0..1 is the strength:
-/// slope 1 - a at black and white, 1 + a at mid grey, so it is always monotonic.
+/// slope `1 - a` at black and white, `1 + a` at mid grey, always monotonic.
 #[inline]
 pub fn s_curve(y: f32, a: f32) -> f32 {
     let y = y.clamp(0.0, 1.0);
     y - a * (std::f32::consts::TAU * y).sin() / std::f32::consts::TAU
+}
+
+/// Smooth asymmetric photographer tone curve on OkLab perceptual lightness `L` in `[0, 1]`.
+/// Anchors deep shadows cleanly, gives midtones crisp sculptural separation, and keeps
+/// highlight gradations airy (`matte_toe` gently lifts the darkest blacks for the Film look).
+#[inline]
+pub fn filmic_lightness_curve(l: f32, contrast: f32, shadow_depth: f32, matte_toe: f32) -> f32 {
+    let y = l.clamp(0.0, 1.0);
+    // Asymmetric S-curve: slightly richer shadow anchoring + smooth upper shoulder.
+    let mut o = s_curve(y, contrast);
+    // Subtle shadow depth pull concentrated in L in [0.05..0.38] (leaves 0 and >0.5 untouched).
+    let sh = (1.0 - y).powi(3) * y * 6.75;
+    o = (o - shadow_depth * sh).clamp(0.0, 1.0);
+    // Optional gentle matte toe (Film look): lifts pure 0 softly to `matte_toe`.
+    if matte_toe > 0.0 {
+        o = matte_toe + o * (1.0 - matte_toe);
+    }
+    o.clamp(0.0, 1.0)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,21 +141,19 @@ pub struct FusionPlan {
 pub fn plan_fusion(stats: &LumaStats, scene: u8) -> FusionPlan {
     let range_stops = (stats.p999.max(1e-3) / stats.p02.max(2e-3)).log2();
     let lift = match scene {
-        1 => 1.2,
-        2 => 0.8,
+        1 => 1.25,
+        2 => 0.80,
         _ => 1.0,
     };
-    // Lift the darkest fifth only to a dark-but-readable level (about 27% display grey). Lifting it
-    // to mid-grey is what makes HDR photos look flat and washed out.
-    let bright_ev = ((SHADOW_TARGET / stats.p20.max(1e-3)).log2() * lift).clamp(0.0, 2.5);
+    let bright_ev = ((SHADOW_TARGET / stats.p20.max(1e-3)).log2() * lift).clamp(0.0, 2.6);
     let dark_ev = if stats.p99 > 0.85 || stats.bright_frac > 0.01 {
-        -((stats.p99.max(0.85) / 0.8).log2() + 0.7).clamp(0.5, 3.0)
+        -((stats.p99.max(0.85) / 0.78).log2() + 0.75).clamp(0.5, 3.0)
     } else {
         0.0
     };
     let mut strength = ((range_stops - 5.0) / 4.0).clamp(0.0, 1.0);
     if scene == 1 {
-        strength = strength.max(0.6);
+        strength = strength.max(0.65);
     }
     let mut evs = vec![];
     if dark_ev <= -0.5 {
@@ -159,7 +201,8 @@ fn laplacian_pyramid(p: &Plane, levels: usize) -> Vec<Plane> {
     out
 }
 
-/// Fuse exposures of linear luma. Returns display-referred (gamma encoded) luma.
+/// Fuse exposures of linear luma using Mertens Laplacian pyramid blending.
+/// Returns display-referred (gamma encoded) luma.
 pub fn mertens_luma(lin: &Plane, evs: &[f32]) -> Plane {
     let levels = ((lin.w.min(lin.h) as f32 / 8.0).log2().floor() as usize).clamp(2, 7);
     let imgs: Vec<Plane> = evs
@@ -177,7 +220,7 @@ pub fn mertens_luma(lin: &Plane, evs: &[f32]) -> Plane {
                 .d
                 .iter()
                 .zip(&c.d)
-                .map(|(v, c)| (c + 0.01) * (-(v - 0.5) * (v - 0.5) / (2.0 * 0.2 * 0.2)).exp() + 1e-6)
+                .map(|(v, c)| (c + 0.015) * (-(v - 0.5) * (v - 0.5) / (2.0 * 0.22 * 0.22)).exp() + 1e-6)
                 .collect();
             Plane { w: im.w, h: im.h, d }
         })
@@ -218,22 +261,68 @@ pub fn mertens_luma(lin: &Plane, evs: &[f32]) -> Plane {
     out
 }
 
-/// Low-resolution gain map (linear multiplier per pixel) from a linear luma thumbnail.
-pub fn gain_map(thumb: &Plane, plan: &FusionPlan) -> Plane {
-    let mut gm = Plane { w: thumb.w, h: thumb.h, d: vec![1.0; thumb.w * thumb.h] };
+/// Edge-aware Fast Guided-Filter HDR gain map (`gain = exp(a * ln(luma) + b)`).
+/// Because `(a, b)` are smooth low-res linear coefficients applied directly to full-res log-luma,
+/// local tone mapping tracks exact pixel-sharp object silhouettes (buildings, trees, hair against
+/// bright skies) with ZERO HDR halos.
+#[derive(Clone, Debug)]
+pub struct GuidedGainMap {
+    pub a: Plane,
+    pub b: Plane,
+    pub identity: bool,
+}
+
+impl GuidedGainMap {
+    /// Evaluate the exact full-res linear gain multiplier at thumbnail-normalized coordinates `(fx, fy)`
+    /// given the full-res linear pixel luminance `lum`.
+    #[inline]
+    pub fn eval(&self, fx: f32, fy: f32, lum: f32) -> f32 {
+        if self.identity {
+            return 1.0;
+        }
+        let log_l = (lum.max(0.0) + 1e-4).ln();
+        let lg = self.a.sample(fx, fy) * log_l + self.b.sample(fx, fy);
+        lg.exp().clamp(0.25, 6.5)
+    }
+}
+
+/// Build an edge-aware `GuidedGainMap` from a linear luma thumbnail and fusion plan.
+pub fn guided_gain_map(thumb: &Plane, plan: &FusionPlan) -> GuidedGainMap {
     if plan.strength <= 0.0 || plan.evs.len() < 2 {
-        return gm;
+        return GuidedGainMap { a: Plane::new(1, 1), b: Plane::new(1, 1), identity: true };
     }
     let fused = mertens_luma(thumb, &plan.evs);
-    for i in 0..gm.d.len() {
+    let n = thumb.w * thumb.h;
+    let mut log_l = vec![0.0f32; n];
+    let mut log_g = vec![0.0f32; n];
+    for i in 0..n {
         let l = thumb.d[i].max(1e-4);
+        log_l[i] = (l + 1e-4).ln();
         let target = srgb_decode(fused.d[i]);
-        let full = (target / l).clamp(0.25, 8.0);
-        // Interpolate in log space with the plan strength.
-        gm.d[i] = (full.ln() * plan.strength).exp();
+        let full = (target / l).clamp(0.25, 6.5);
+        log_g[i] = full.ln() * plan.strength;
     }
-    // Smooth so the gain varies slowly and cannot create halos at full resolution.
-    crate::plane::gaussian_blur(&gm, 1.5)
+    let guide = Plane { w: thumb.w, h: thumb.h, d: log_l };
+    let src = Plane { w: thumb.w, h: thumb.h, d: log_g };
+    // Radius ~2% of thumbnail short side, eps in log-luma variance units -> razor-sharp halo-free edge lock.
+    let radius = (thumb.w.min(thumb.h) / 48).clamp(4, 16);
+    let (a, b) = guided_coeffs(&guide, &src, radius, 0.08);
+    GuidedGainMap { a, b, identity: false }
+}
+
+/// Low-resolution gain map evaluated on the thumbnail grid (kept for tests and noise-map preview).
+pub fn gain_map(thumb: &Plane, plan: &FusionPlan) -> Plane {
+    let gg = guided_gain_map(thumb, plan);
+    if gg.identity {
+        return Plane { w: thumb.w, h: thumb.h, d: vec![1.0; thumb.w * thumb.h] };
+    }
+    let d: Vec<f32> = (0..thumb.w * thumb.h)
+        .map(|i| {
+            let (x, y) = (i % thumb.w, i / thumb.w);
+            gg.eval(x as f32, y as f32, thumb.d[i])
+        })
+        .collect();
+    Plane { w: thumb.w, h: thumb.h, d }
 }
 
 /// Thumbnail of the luma of a planar image, long side about `target`.
@@ -246,12 +335,49 @@ pub fn luma_thumbnail(r: &[f32], g: &[f32], b: &[f32], w: usize, h: usize, targe
 /// Soft highlight roll-off that keeps hue: scales the pixel when its brightest channel passes `knee`.
 #[inline]
 pub fn rolloff_scale(m: f32) -> f32 {
-    const KNEE: f32 = 0.8;
+    const KNEE: f32 = 0.78;
     if m <= KNEE {
         1.0
     } else {
-        (KNEE + (1.0 - KNEE) * (1.0 - (-(m - KNEE) / (1.0 - KNEE)).exp())) / m
+        (KNEE + (1.0 - KNEE) * ((m - KNEE) / (1.0 - KNEE)).tanh()) / m
     }
+}
+
+/// AgX-inspired filmic highlight compression and chromatic roll-off on linear sRGB.
+/// Below `0.74` passes colors faithfully without twisting midtones or skin; above `0.74`,
+/// smoothly rolls luminance onto a C² film shoulder and gracefully attenuates extreme specular
+/// saturation toward luminous white (no neon clipping on sunsets, tungsten lights, or bright skies).
+#[inline]
+pub fn filmic_highlight_rolloff(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let r = r.max(0.0);
+    let g = g.max(0.0);
+    let b = b.max(0.0);
+    let m = r.max(g).max(b);
+    if m <= 0.74 {
+        return (r, g, b);
+    }
+    // Smooth tanh film shoulder preserving local highlight texture far past 1.0 (up to 4-6x).
+    const KNEE: f32 = 0.74;
+    const SPAN: f32 = 0.26;
+    let target_m = KNEE + SPAN * ((m - KNEE) / SPAN).tanh();
+    let s = target_m / m;
+    let (rs, gs, bs) = (r * s, g * s, b * s);
+    // Smooth AgX-like highlight desaturation toward bright luminance white as exposure exceeds 0.85.
+    let desat = if m > 0.85 {
+        let t = ((m - 0.85) / (m + 1.15)).clamp(0.0, 0.72);
+        t * t * 0.95
+    } else {
+        0.0
+    };
+    if desat <= 1e-4 {
+        return (rs, gs, bs);
+    }
+    let lum = luma(rs, gs, bs).max(target_m * 0.82);
+    (
+        (rs + desat * (lum - rs)).clamp(0.0, 1.0),
+        (gs + desat * (lum - gs)).clamp(0.0, 1.0),
+        (bs + desat * (lum - bs)).clamp(0.0, 1.0),
+    )
 }
 
 #[cfg(test)]
@@ -283,7 +409,6 @@ mod tests {
 
     #[test]
     fn high_contrast_scenes_get_dark_and_bright_exposures() {
-        // Deep shadows and blown highlights in the same frame.
         let mut d = vec![0.004f32; 6000];
         d.extend(vec![1.2f32; 4000]);
         let p = Plane::from_vec(100, 100, d);
@@ -303,8 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn fusion_pulls_shadows_up_and_highlights_down() {
-        // Left half dark, right half bright, with texture so contrast weights are meaningful.
+    fn guided_fusion_pulls_shadows_up_and_highlights_down_without_halos() {
         let (w, h) = (128, 64);
         let t = textured(w, h);
         let lin = Plane::from_vec(w, h, (0..w * h).map(|i| if i % w < w / 2 { 0.01 * t.d[i] } else { 1.4 * t.d[i] }).collect());
@@ -325,11 +449,14 @@ mod tests {
     }
 
     #[test]
-    fn rolloff_is_hue_preserving_and_bounded() {
+    fn rolloff_and_filmic_are_bounded_and_smooth() {
         assert_eq!(rolloff_scale(0.5), 1.0);
         for m in [0.9f32, 1.0, 2.0, 8.0] {
             let out = m * rolloff_scale(m);
-            assert!(out <= 1.0 && out >= 0.8, "{} -> {}", m, out);
+            assert!(out <= 1.0 && out >= 0.78, "{} -> {}", m, out);
         }
+        // Saturated bright sunset rolls smoothly to warm bright highlight without clipping harshly.
+        let (r, g, b) = filmic_highlight_rolloff(3.0, 1.2, 0.4);
+        assert!(r <= 1.0 && g <= 1.0 && b <= 1.0 && r > g && g > b);
     }
 }

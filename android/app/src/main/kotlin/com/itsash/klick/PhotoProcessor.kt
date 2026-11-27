@@ -41,6 +41,7 @@ class BurstJob(
     val location: Location?,
     val aperture: Float,
     val focalLength: Float,
+    val look: String = "pro",
 ) {
     val bytes: Long get() = buffers.sumOf { it.capacity().toLong() }
 }
@@ -93,16 +94,21 @@ class PhotoProcessor(private val context: Context, private val emit: (Map<String
         val status: NativeEngine.Status
         var refIndex = 0
         if (job.raw) {
-            val built = EngineMeta.rawMeta(job.characteristics, job.results[0], job.plan)
+            // Drop any HAL exposure-glitch frame (common on frame 0 when switching from auto-AE preview
+            // to manual-AE burst) whose actual exposure * ISO deviates >20% from the burst median.
+            val keep = consistentFrameIndices(job.results)
+            val rawBufs = keep.map { job.buffers[it] }.toTypedArray()
+            val settled = job.results[keep.last()]
+            val built = EngineMeta.rawMeta(job.characteristics, settled, job.plan, job.look)
             status = NativeEngine.parse(
-                NativeEngine.processRaw(job.buffers.toTypedArray(), job.width, job.height, job.rowStride, built.meta, built.lsc, tmp.path, job.quality),
+                NativeEngine.processRaw(rawBufs, job.width, job.height, job.rowStride, built.meta, built.lsc, tmp.path, job.quality),
             )
             if (!status.ok) error(status.message)
-            refIndex = status.refIndex.coerceIn(0, job.frameCount - 1)
-            val refMeta = EngineMeta.rawMeta(job.characteristics, job.results[refIndex], job.plan)
+            refIndex = keep[status.refIndex.coerceIn(0, keep.size - 1)]
+            val refMeta = EngineMeta.rawMeta(job.characteristics, job.results[refIndex], job.plan, job.look)
             NativeEngine.referenceRaw(arrayOf(job.buffers[refIndex]), job.width, job.height, job.rowStride, refMeta.meta, refMeta.lsc, refFile.path, 80)
         } else {
-            val meta = EngineMeta.yuvMeta(job.results.firstOrNull(), job.plan)
+            val meta = EngineMeta.yuvMeta(job.results.lastOrNull(), job.plan, job.look)
             status = NativeEngine.parse(
                 NativeEngine.processYuv(job.buffers.toTypedArray(), job.width, job.height, job.yuvStrides, meta, tmp.path, job.quality),
             )
@@ -143,11 +149,29 @@ class PhotoProcessor(private val context: Context, private val emit: (Map<String
         val now = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date())
         ex.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, now)
         ex.setAttribute(ExifInterface.TAG_DATETIME, now)
+        ex.setAttribute(ExifInterface.TAG_COLOR_SPACE, "1")
         ex.setAttribute(ExifInterface.TAG_MAKE, android.os.Build.MANUFACTURER)
         ex.setAttribute(ExifInterface.TAG_MODEL, android.os.Build.MODEL)
-        ex.setAttribute(ExifInterface.TAG_SOFTWARE, "Klick ${job.plan.scene.label}, ${status.frames} frames")
+        ex.setAttribute(ExifInterface.TAG_SOFTWARE, "Klick ${job.plan.scene.label} (${job.look}), ${status.frames} frames")
         job.location?.let { ex.setGpsInfo(it) }
         ex.saveAttributes()
+    }
+
+    private fun consistentFrameIndices(results: List<TotalCaptureResult>): List<Int> {
+        if (results.size <= 1) return results.indices.toList()
+        val products = results.map { r ->
+            val exp = r.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME)?.toDouble() ?: 0.0
+            val iso = r.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)?.toDouble() ?: 0.0
+            exp * iso
+        }
+        val valid = products.filter { it > 0.0 }.sorted()
+        if (valid.isEmpty()) return results.indices.toList()
+        val median = valid[valid.size / 2]
+        val keep = results.indices.filter { i ->
+            val p = products[i]
+            p <= 0.0 || (p >= median * 0.8 && p <= median * 1.25)
+        }
+        return keep.ifEmpty { results.indices.toList() }
     }
 
     private fun writeDng(out: java.io.OutputStream, job: BurstJob, refIndex: Int) {

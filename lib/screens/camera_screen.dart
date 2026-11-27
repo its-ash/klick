@@ -54,6 +54,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.settings.addListener(_onSettings);
     _queue.addListener(_onQueue);
     _events = widget.camera.events().listen(_onEvent);
     _boot();
@@ -62,6 +63,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.settings.removeListener(_onSettings);
     _countdownTimer?.cancel();
     _events?.cancel();
     _roll.dispose();
@@ -69,6 +71,10 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     _queue.dispose();
     widget.camera.stop();
     super.dispose();
+  }
+
+  void _onSettings() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -219,6 +225,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         keepDng: s.keepDng,
         sound: s.shutterSound,
         location: s.locationTag,
+        look: s.look.name,
       );
     } catch (e) {
       if (mounted) context.showToast(_clean(e));
@@ -460,7 +467,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
             children: [
               _GalleryButton(thumb: _lastThumb, onTap: _openGallery),
               _ShutterButton(busy: _capturing, counting: _countdown != null, onTap: _shutter),
-              const SizedBox(width: 56, height: 56),
+              _LookButton(look: widget.settings.look, onTap: _capturing ? null : widget.settings.cycleLook),
             ],
           ),
           if (_capturing)
@@ -597,6 +604,54 @@ class _GalleryButton extends StatelessWidget {
             image: thumb == null ? null : DecorationImage(image: MemoryImage(thumb!), fit: BoxFit.cover),
           ),
           child: thumb == null ? const Icon(Icons.photo_library_outlined, color: Colors.white70) : null,
+        ),
+      ),
+    );
+  }
+}
+
+class _LookButton extends StatelessWidget {
+  const _LookButton({required this.look, required this.onTap});
+
+  final PhotoLook look;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = switch (look) {
+      PhotoLook.pro => Colors.amberAccent,
+      PhotoLook.natural => Colors.white,
+      PhotoLook.vivid => Colors.orangeAccent,
+      PhotoLook.film => const Color(0xFFFFD180),
+      PhotoLook.mono => Colors.white70,
+    };
+    return Semantics(
+      button: true,
+      excludeSemantics: true,
+      label: 'Photo look: ${look.label}',
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            color: Colors.white12,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: accent.withValues(alpha: 0.7)),
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.auto_fix_high_rounded, size: 20, color: accent),
+              const SizedBox(height: 2),
+              Text(
+                look.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: accent, fontSize: 11, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -5,11 +5,39 @@
 //! 6..9 as-shot neutral (R,G,B), 9..18 forward matrix 1, 18..27 forward matrix 2,
 //! 27..36 color matrix 1, 36..45 color matrix 2, 45 cct 1, 46 cct 2,
 //! 47 noise S, 48 noise O, 49 iso, 50 exposure ns, 51 ev gain, 52 scene (0 normal, 1 hdr, 2 night),
-//! 53 lsc width, 54 lsc height.
+//! 53 lsc width, 54 lsc height, 55 photo look (0 pro, 1 natural, 2 vivid, 3 film, 4 mono).
 
 use crate::merge::NoiseModel;
 
 pub const META_LEN: usize = 64;
+
+/// Photographic finishing profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PhotoLook {
+    /// Editorial DSLR look: crisp detail, guided HDR, rich skies, flattering skin, subtle split tone.
+    Pro = 0,
+    /// Faithful neutral look: minimal grading, optical sharpness, clean highlights.
+    Natural = 1,
+    /// Punchy travel/landscape color and clarity with skin-tone protection.
+    Vivid = 2,
+    /// Classic Kodak Portra / editorial cinema palette: warm glow, subtle matte shadow toe, organic texture.
+    Film = 3,
+    /// Sculptural monochrome (red-filter sky drama, deep contrast, crisp micro-texture).
+    Mono = 4,
+}
+
+impl PhotoLook {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Natural,
+            2 => Self::Vivid,
+            3 => Self::Film,
+            4 => Self::Mono,
+            _ => Self::Pro,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Meta {
@@ -30,6 +58,7 @@ pub struct Meta {
     pub scene: u8,
     pub lsc_w: usize,
     pub lsc_h: usize,
+    pub look: u8,
 }
 
 fn arr9(s: &[f32]) -> [f32; 9] {
@@ -58,6 +87,7 @@ impl Default for Meta {
             scene: 0,
             lsc_w: 0,
             lsc_h: 0,
+            look: 0,
         }
     }
 }
@@ -85,6 +115,7 @@ impl Meta {
             scene: (s[52] as i32).clamp(0, 2) as u8,
             lsc_w: s[53].max(0.0) as usize,
             lsc_h: s[54].max(0.0) as usize,
+            look: (s[55] as i32).clamp(0, 4) as u8,
         };
         if !(m.white > m.black.iter().cloned().fold(0.0, f32::max) + 1.0) {
             return Err("white level must exceed black level".into());
@@ -154,7 +185,9 @@ mod tests {
         s[6] = 0.5;
         s[7] = 1.0;
         s[8] = 0.6;
-        assert!(Meta::from_slice(&s).is_ok());
+        s[55] = 3.0;
+        let m = Meta::from_slice(&s).unwrap();
+        assert_eq!(m.look, 3);
         s[1] = 10.0;
         assert!(Meta::from_slice(&s).is_err());
     }

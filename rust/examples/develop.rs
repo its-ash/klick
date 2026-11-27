@@ -6,7 +6,7 @@
 //! input is still the single DNG frame. Reads uncompressed DNGs like the ones `DngCreator` writes.
 
 use klick_engine::merge::NoiseModel;
-use klick_engine::meta::Meta;
+use klick_engine::meta::{Meta, PhotoLook};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -110,6 +110,7 @@ fn main() {
     let ev: f32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let scene: u8 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
     let frames: usize = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let look: u8 = a.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
 
     let bytes = std::fs::read(&a[1]).expect("read dng");
     let t = Tiff { b: &bytes, le: &bytes[0..2] == b"II" };
@@ -176,7 +177,14 @@ fn main() {
     let norm = klick_engine::raw::normalize_raw(&raw, w, h, w * 2, &meta).expect("normalize");
     let rgb = klick_engine::pipeline::develop_bayer(norm, w, h, &meta, None, klick_engine::pipeline::DEFAULT_MAX_PIXELS);
     let (ow, oh) = (rgb.w, rgb.h);
-    let params = klick_engine::finish::FinishParams { scene, ev_gain: ev, noise, frames, display_referred: false };
+    let params = klick_engine::finish::FinishParams {
+        scene,
+        ev_gain: ev,
+        noise,
+        frames,
+        display_referred: false,
+        look: PhotoLook::from_u8(look),
+    };
     let (px, info) = klick_engine::finish::finish(rgb, &params);
     let jpeg = klick_engine::encode::encode_jpeg(&px, ow, oh, 92).expect("encode");
     std::fs::write(&a[2], jpeg).expect("write");

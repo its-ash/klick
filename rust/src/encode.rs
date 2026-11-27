@@ -1,6 +1,7 @@
-//! Stage 6: JPEG encoding (pure Rust baseline encoder). EXIF is added by the Kotlin side.
+//! Stage 6: High-fidelity JPEG encoding with quality-adaptive chroma subsampling
+//! (4:4:4 at Q >= 95 for zero colored-edge fringing, 4:2:2 at Q >= 90) and optimized Huffman tables.
 
-use jpeg_encoder::{ColorType, Encoder};
+use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 
 pub fn encode_jpeg(rgb8: &[u8], w: usize, h: usize, quality: u8) -> Result<Vec<u8>, String> {
     if w == 0 || h == 0 || w > 65535 || h > 65535 {
@@ -9,8 +10,18 @@ pub fn encode_jpeg(rgb8: &[u8], w: usize, h: usize, quality: u8) -> Result<Vec<u
     if rgb8.len() != w * h * 3 {
         return Err("pixel buffer does not match the size".into());
     }
+    let q = quality.clamp(1, 100);
     let mut out = Vec::with_capacity(w * h / 2);
-    let enc = Encoder::new(&mut out, quality.clamp(1, 100));
+    let mut enc = Encoder::new(&mut out, q);
+    enc.set_optimized_huffman_tables(true);
+    let sampling = if q >= 95 {
+        SamplingFactor::R_4_4_4
+    } else if q >= 90 {
+        SamplingFactor::R_4_2_2
+    } else {
+        SamplingFactor::R_4_2_0
+    };
+    enc.set_sampling_factor(sampling);
     enc.encode(rgb8, w as u16, h as u16, ColorType::Rgb).map_err(|e| e.to_string())?;
     Ok(out)
 }
@@ -29,7 +40,7 @@ mod tests {
         let px = dec.decode().unwrap();
         let info = dec.info().unwrap();
         assert_eq!((info.width as usize, info.height as usize), (w, h));
-        assert!((px[0] as i32 - 200).abs() < 6 && (px[1] as i32 - 120).abs() < 6 && (px[2] as i32 - 40).abs() < 6);
+        assert!((px[0] as i32 - 200).abs() < 4 && (px[1] as i32 - 120).abs() < 4 && (px[2] as i32 - 40).abs() < 4);
     }
 
     #[test]
